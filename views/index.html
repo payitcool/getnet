@@ -1,0 +1,23 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Prueba Getnet</title>
+    <style>
+        body { font-family: sans-serif; display: flex; justify-content: center; align-items: center; height: 100vh; background-color: #f0f0f0; }
+        .card { background: white; padding: 2rem; border-radius: 8px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); text-align: center; }
+        button { background-color: #e60000; color: white; border: none; padding: 10px 20px; font-size: 1.2rem; border-radius: 4px; cursor: pointer; }
+        button:hover { background-color: #cc0000; }
+    </style>
+</head>
+<body>
+    <div class="card">
+        <h1>Prueba de Pago Getnet</h1>
+        <p>Monto: $5.000 CLP</p>
+        <form action="/create-payment" method="POST">
+            <button type="submit">Pagar $5.000</button>
+        </form>
+    </div>
+</body>
+</html>
