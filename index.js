@@ -183,6 +183,7 @@ app.post('/create-payment', async (req, res) => {
                 documentType: 'RUT',
                 mobile: '+56912345678'
             },
+            
             payment: {
                 reference: reference,
                 description: 'Pago de prueba 5000 CLP',
