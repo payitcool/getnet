@@ -250,20 +250,6 @@ Ver `EJEMPLOS_PAYMENT_SUCCESSFUL.js` para más ejemplos.
 - Moment.js
 - dotenv
 
-## 📚 Documentación
-
-Toda la documentación del proyecto está organizada en la carpeta [`docs/`](docs/):
-
-- 🛠️ **[Guías de Implementación](docs/guides/)** - Guías rápidas y tutoriales
-- 💳 **[Ejemplos de Pagos](docs/payments/)** - Código de ejemplo para pagos
-- 🧪 **[Testing](docs/testing/)** - Tarjetas de prueba para sandbox
-- 🔄 **[Workflows](docs/workflows/)** - CI/CD y automatización
-
-**Documentos destacados**:
-- [📖 Guía Rápida](docs/guides/quick-start.md)
-- [💳 Tarjetas de Prueba](docs/testing/test-cards.md)
-- [🎯 Resumen de Implementación](docs/guides/implementation.md)
-
 ---
 
 **Desarrollado para producción** 🚀

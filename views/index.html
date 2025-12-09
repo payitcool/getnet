@@ -3,21 +3,205 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Prueba Getnet</title>
+    <title>Cubic Hologram - Compra tu Entrada</title>
     <style>
-        body { font-family: sans-serif; display: flex; justify-content: center; align-items: center; height: 100vh; background-color: #f0f0f0; }
-        .card { background: white; padding: 2rem; border-radius: 8px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); text-align: center; }
-        button { background-color: #e60000; color: white; border: none; padding: 10px 20px; font-size: 1.2rem; border-radius: 4px; cursor: pointer; }
-        button:hover { background-color: #cc0000; }
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body { 
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            padding: 20px;
+        }
+        
+        .container {
+            max-width: 600px;
+            width: 100%;
+        }
+        
+        .card { 
+            background: rgba(255, 255, 255, 0.95);
+            backdrop-filter: blur(10px);
+            padding: 3rem;
+            border-radius: 20px;
+            box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+            text-align: center;
+        }
+        
+        .hologram-icon {
+            font-size: 4rem;
+            margin-bottom: 1rem;
+            animation: float 3s ease-in-out infinite;
+        }
+        
+        @keyframes float {
+            0%, 100% { transform: translateY(0px); }
+            50% { transform: translateY(-20px); }
+        }
+        
+        h1 {
+            color: #667eea;
+            font-size: 2rem;
+            margin-bottom: 0.5rem;
+            font-weight: 700;
+        }
+        
+        .subtitle {
+            color: #555;
+            font-size: 1.1rem;
+            margin-bottom: 2rem;
+            line-height: 1.6;
+        }
+        
+        .event-details {
+            background: linear-gradient(135deg, #667eea15 0%, #764ba215 100%);
+            padding: 1.5rem;
+            border-radius: 12px;
+            margin-bottom: 2rem;
+            text-align: left;
+        }
+        
+        .detail-item {
+            display: flex;
+            align-items: center;
+            margin-bottom: 1rem;
+            color: #333;
+        }
+        
+        .detail-item:last-child {
+            margin-bottom: 0;
+        }
+        
+        .detail-icon {
+            font-size: 1.5rem;
+            margin-right: 1rem;
+            min-width: 30px;
+        }
+        
+        .price-section {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 1.5rem;
+            border-radius: 12px;
+            margin-bottom: 2rem;
+        }
+        
+        .price-label {
+            font-size: 0.9rem;
+            opacity: 0.9;
+            margin-bottom: 0.5rem;
+        }
+        
+        .price {
+            font-size: 3rem;
+            font-weight: 700;
+        }
+        
+        button { 
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            border: none;
+            padding: 16px 48px;
+            font-size: 1.3rem;
+            border-radius: 50px;
+            cursor: pointer;
+            font-weight: 600;
+            transition: all 0.3s ease;
+            box-shadow: 0 8px 20px rgba(102, 126, 234, 0.4);
+            width: 100%;
+        }
+        
+        button:hover { 
+            transform: translateY(-2px);
+            box-shadow: 0 12px 30px rgba(102, 126, 234, 0.6);
+        }
+        
+        button:active {
+            transform: translateY(0);
+        }
+        
+        .secure-payment {
+            margin-top: 1.5rem;
+            font-size: 0.85rem;
+            color: #888;
+        }
+        
+        .secure-icon {
+            color: #4CAF50;
+        }
+        
+        @media (max-width: 640px) {
+            .card {
+                padding: 2rem 1.5rem;
+            }
+            
+            h1 {
+                font-size: 1.5rem;
+            }
+            
+            .subtitle {
+                font-size: 1rem;
+            }
+            
+            .price {
+                font-size: 2.5rem;
+            }
+        }
     </style>
 </head>
 <body>
-    <div class="card">
-        <h1>Prueba de Pago Getnet</h1>
-        <p>Monto: $5.000 CLP</p>
-        <form action="/create-payment" method="POST">
-            <button type="submit">Pagar $5.000</button>
-        </form>
+    <div class="container">
+        <div class="card">
+            <div class="hologram-icon">🔮✨</div>
+            
+            <h1>Cubic Hologram</h1>
+            <p class="subtitle">Vive la experiencia de un holograma con streaming en tiempo real</p>
+            
+            <div class="event-details">
+                <div class="detail-item">
+                    <span class="detail-icon">🎫</span>
+                    <div>
+                        <strong>Tipo de Entrada</strong><br>
+                        Entrada General
+                    </div>
+                </div>
+                <div class="detail-item">
+                    <span class="detail-icon">📍</span>
+                    <div>
+                        <strong>Ubicación</strong><br>
+                        Avenida del Parque 5275<br>
+                        Ciudad Empresarial, Santiago
+                    </div>
+                </div>
+                <div class="detail-item">
+                    <span class="detail-icon">🎁</span>
+                    <div>
+                        <strong>Beneficio</strong><br>
+                        Participa por premios exclusivos
+                    </div>
+                </div>
+            </div>
+            
+            <div class="price-section">
+                <div class="price-label">Precio por entrada</div>
+                <div class="price">$5.000</div>
+            </div>
+            
+            <form action="/create-payment" method="POST">
+                <button type="submit">🎟️ Comprar Entrada</button>
+            </form>
+            
+            <div class="secure-payment">
+                <span class="secure-icon">🔒</span> Pago seguro procesado por Getnet
+            </div>
+        </div>
     </div>
 </body>
 </html>

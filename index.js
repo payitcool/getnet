@@ -192,7 +192,7 @@ app.post('/create-payment', async (req, res) => {
                 }
             },
             expiration: moment().add(10, 'minutes').toISOString(),
-            returnUrl: `${DOMAIN}/response`,
+            returnUrl: `${DOMAIN}/response?reference=${reference}`,
             notificationUrl: `${DOMAIN}/api/notification`,
             ipAddress: req.ip || '127.0.0.1',
             userAgent: req.headers['user-agent'] || 'Unknown'
@@ -303,10 +303,37 @@ app.post('/api/notification', async (req, res) => {
     try {
         console.log('🔔 Notification received from Getnet:', JSON.stringify(req.body, null, 2));
 
-        const { requestId, status } = req.body;
+        const { requestId, reference, signature, status } = req.body;
 
         if (!requestId) {
             return res.status(400).json({ error: 'Missing requestId' });
+        }
+
+        // Validar signature según el manual de Getnet
+        // SHA-256(requestId + status + date + secretKey)
+        if (signature) {
+            const statusStr = status?.status || '';
+            const dateStr = req.body.date || new Date().toISOString();
+            const calculatedSignature = CryptoJS.SHA256(
+                `${requestId}${statusStr}${dateStr}${SECRET_KEY}`
+            ).toString();
+            
+            if (calculatedSignature !== signature) {
+                console.warn('⚠️  Invalid signature in notification');
+                await logToDB('NOTIFICATION_INVALID_SIGNATURE', {
+                    requestId,
+                    reference,
+                    providedSignature: signature,
+                    calculatedSignature,
+                    endpoint: '/api/notification',
+                    method: 'POST',
+                    request: req.body,
+                    ip: req.ip,
+                    userAgent: req.headers['user-agent']
+                });
+                return res.status(401).json({ error: 'Invalid signature' });
+            }
+            console.log('✅ Signature validated successfully');
         }
 
         // Find payment in database
@@ -496,10 +523,21 @@ app.get('/api/payment-status/:requestId', async (req, res) => {
  */
 app.get('/response', async (req, res) => {
     try {
-        // Getnet usually sends requestId as query parameter
+        // Getnet redirige con el reference que enviamos en returnUrl
+        const reference = req.query.reference;
         const requestId = req.query.requestId || req.query.id;
 
-        if (!requestId) {
+        console.log('🔄 User returned from Getnet:', { reference, requestId });
+
+        // Buscar pago por reference (recomendado) o requestId
+        let payment;
+        if (reference) {
+            payment = await Payment.findOne({ reference });
+        } else if (requestId) {
+            payment = await Payment.findOne({ requestId });
+        }
+
+        if (!payment) {
             return res.send(`
                 <html>
                 <head>
@@ -512,7 +550,7 @@ app.get('/response', async (req, res) => {
                 <body>
                     <div class="error">
                         <h1>❌ Error</h1>
-                        <p>No se encontró el identificador de pago.</p>
+                        <p>No se encontró el pago. Reference: ${reference || 'N/A'}</p>
                         <a href="/">Volver al inicio</a>
                     </div>
                 </body>
@@ -520,10 +558,10 @@ app.get('/response', async (req, res) => {
             `);
         }
 
-        console.log(`🔄 User returned from Getnet. RequestId: ${requestId}`);
+        console.log(`🔄 Payment found: ${payment.requestId}`);
 
         // Query current payment status from Getnet
-        let payment = await Payment.findOne({ requestId });
+        const requestIdToQuery = payment.requestId;
         
         if (payment) {
             try {
@@ -538,12 +576,11 @@ app.get('/response', async (req, res) => {
 
                     // Si el pago cambió a APPROVED, ejecutar lógica de negocio
                     if (payment.status === 'APPROVED' && oldStatus !== 'APPROVED') {
-                        await paymentSuccessful(requestId);
+                        await paymentSuccessful(requestIdToQuery);
                     }
                 }
-            } catch (error) {
-                console.error('Error querying Getnet status:', error.message);
-            }
+        } catch (error) {
+            console.error('Error querying Getnet status:', error.message);
         }
 
         // Generate response based on status
