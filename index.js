@@ -679,10 +679,10 @@ app.get('/response', async (req, res) => {
                         <table>
                             <tr><td class="label">Referencia:</td><td>${payment?.reference || 'N/A'}</td></tr>
                             <tr><td class="label">Estado:</td><td>${status}</td></tr>
-                            <tr><td class="label">Request ID:</td><td>${requestId}</td></tr>
+                            <tr><td class="label">Request ID:</td><td>${payment?.requestId || 'N/A'}</td></tr>
                         </table>
                         <p style="margin-top: 15px;">
-                            <a href="/api/payment-status/${requestId}" target="_blank">Ver estado actualizado (JSON)</a>
+                            <a href="/api/payment-status/${payment?.requestId}" target="_blank">Ver estado actualizado (JSON)</a>
                         </p>
                     </div>
                     <br>
