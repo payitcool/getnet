@@ -580,8 +580,9 @@ app.get('/response', async (req, res) => {
                         await paymentSuccessful(requestIdToQuery);
                     }
                 }
-        } catch (error) {
-            console.error('Error querying Getnet status:', error.message);
+            } catch (error) {
+                console.error('Error querying Getnet status:', error.message);
+            }
         }
 
         // Generate response based on status
