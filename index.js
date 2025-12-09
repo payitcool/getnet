@@ -5,6 +5,7 @@ const CryptoJS = require('crypto-js');
 const moment = require('moment');
 const bodyParser = require('body-parser');
 const path = require('path');
+const cors = require('cors');
 const swaggerUi = require('swagger-ui-express');
 const swaggerSpec = require('./config/swagger');
 const connectDB = require('./config/database');
@@ -16,6 +17,9 @@ const port = process.env.PORT || 3000;
 
 // Connect to MongoDB
 connectDB();
+
+// Enable CORS for all origins
+app.use(cors());
 
 app.use(bodyParser.json());
 app.use(bodyParser.urlencoded({ extended: true }));
