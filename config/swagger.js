@@ -9,12 +9,12 @@ const options = {
             description: 'API completa para integración con Getnet Chile (PlaceToPay). Incluye webhooks, verificación de estados y reconciliación automática.',
             contact: {
                 name: 'API Support',
-                email: 'support@getnet.cloud.app'
+                email: 'support@payments.sitholding.com'
             },
         },
         servers: [
             {
-                url: 'https://getnet.cloud.app',
+                url: 'https://payments.sitholding.com',
                 description: 'Servidor de Producción'
             },
             {
@@ -23,6 +23,10 @@ const options = {
             }
         ],
         tags: [
+            {
+                name: 'Health',
+                description: 'Endpoints de monitoreo y health check'
+            },
             {
                 name: 'Payments',
                 description: 'Operaciones relacionadas con pagos'

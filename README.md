@@ -101,7 +101,7 @@ Copia `.env.example` a `.env` y configura:
 
 ```env
 # Domain (tu dominio público)
-DOMAIN=https://getnet.cloud.app
+DOMAIN=https://payments.sitholding.com
 
 # MongoDB
 MONGODB_URI=mongodb+srv://user:password@cluster.mongodb.net/getnet
@@ -131,12 +131,12 @@ npm start
 
 ## 📡 URLs Importantes
 
-- **Frontend**: `https://getnet.cloud.app/`
-- **Swagger Docs**: `https://getnet.cloud.app/docs` 🆕
-- **Webhook**: `https://getnet.cloud.app/api/notification`
-- **API Status**: `https://getnet.cloud.app/api/payment-status/:requestId`
-- **CRON**: `https://getnet.cloud.app/api/cron` 🆕
-- **Return URL**: `https://getnet.cloud.app/response`
+- **Frontend**: `https://payments.sitholding.com/`
+- **Swagger Docs**: `https://payments.sitholding.com/docs` 🆕
+- **Webhook**: `https://payments.sitholding.com/api/notification`
+- **API Status**: `https://payments.sitholding.com/api/payment-status/:requestId`
+- **CRON**: `https://payments.sitholding.com/api/cron` 🆕
+- **Return URL**: `https://payments.sitholding.com/response`
 
 ## 🔍 Monitoreo y Logs
 
@@ -197,10 +197,10 @@ Las reversas en Getnet ocurren solo si:
 ```bash
 # Configurar en crontab (Linux/Mac)
 # Ejecutar cada 6 horas:
-0 */6 * * * curl https://getnet.cloud.app/api/cron
+0 */6 * * * curl https://payments.sitholding.com/api/cron
 
 # Ejecutar diariamente a las 3 AM:
-0 3 * * * curl https://getnet.cloud.app/api/cron
+0 3 * * * curl https://payments.sitholding.com/api/cron
 ```
 
 El CRON:

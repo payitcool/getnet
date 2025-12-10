@@ -1,0 +1,387 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Resultado del Pago - Getnet</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body { 
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            padding: 20px;
+        }
+        
+        .container {
+            max-width: 600px;
+            width: 100%;
+        }
+        
+        .card { 
+            background: rgba(255, 255, 255, 0.95);
+            backdrop-filter: blur(10px);
+            padding: 3rem;
+            border-radius: 20px;
+            box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+            text-align: center;
+        }
+        
+        .status-icon {
+            font-size: 5rem;
+            margin-bottom: 1.5rem;
+        }
+        
+        .status-icon.loading {
+            animation: pulse 1.5s ease-in-out infinite;
+        }
+        
+        @keyframes pulse {
+            0%, 100% { opacity: 1; transform: scale(1); }
+            50% { opacity: 0.5; transform: scale(0.95); }
+        }
+        
+        h1 {
+            font-size: 2rem;
+            margin-bottom: 0.5rem;
+            font-weight: 700;
+        }
+        
+        h1.success { color: #28a745; }
+        h1.error { color: #dc3545; }
+        h1.pending { color: #ffc107; }
+        h1.loading { color: #667eea; }
+        
+        .message {
+            color: #555;
+            font-size: 1.1rem;
+            margin-bottom: 2rem;
+            line-height: 1.6;
+        }
+        
+        .details-section {
+            background: #f8f9fa;
+            padding: 1.5rem;
+            border-radius: 12px;
+            margin-bottom: 2rem;
+            text-align: left;
+        }
+        
+        .details-section h3 {
+            color: #333;
+            margin-bottom: 1rem;
+            font-size: 1.1rem;
+        }
+        
+        .detail-row {
+            display: flex;
+            justify-content: space-between;
+            padding: 0.75rem 0;
+            border-bottom: 1px solid #e9ecef;
+        }
+        
+        .detail-row:last-child {
+            border-bottom: none;
+        }
+        
+        .detail-label {
+            color: #666;
+            font-weight: 500;
+        }
+        
+        .detail-value {
+            color: #333;
+            font-weight: 600;
+            text-align: right;
+            word-break: break-all;
+        }
+        
+        .status-badge {
+            display: inline-block;
+            padding: 0.25rem 0.75rem;
+            border-radius: 20px;
+            font-size: 0.85rem;
+            font-weight: 600;
+        }
+        
+        .status-badge.approved { background: #d4edda; color: #155724; }
+        .status-badge.rejected, .status-badge.failed { background: #f8d7da; color: #721c24; }
+        .status-badge.pending, .status-badge.created { background: #fff3cd; color: #856404; }
+        .status-badge.expired { background: #e2e3e5; color: #383d41; }
+        
+        .btn {
+            display: inline-block;
+            padding: 1rem 2rem;
+            border-radius: 50px;
+            font-size: 1rem;
+            font-weight: 600;
+            text-decoration: none;
+            transition: all 0.3s ease;
+            cursor: pointer;
+            border: none;
+        }
+        
+        .btn-primary {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+        }
+        
+        .btn-primary:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 5px 20px rgba(102, 126, 234, 0.4);
+        }
+        
+        .btn-secondary {
+            background: #6c757d;
+            color: white;
+            margin-left: 1rem;
+        }
+        
+        .btn-secondary:hover {
+            background: #5a6268;
+        }
+        
+        .error-details {
+            background: #f8d7da;
+            color: #721c24;
+            padding: 1rem;
+            border-radius: 8px;
+            margin-bottom: 1.5rem;
+            font-size: 0.9rem;
+            text-align: left;
+        }
+        
+        .hidden {
+            display: none;
+        }
+        
+        .refresh-link {
+            color: #667eea;
+            text-decoration: none;
+            font-size: 0.9rem;
+            margin-top: 1rem;
+            display: inline-block;
+        }
+        
+        .refresh-link:hover {
+            text-decoration: underline;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="card">
+            <!-- Loading State -->
+            <div id="loading-state">
+                <div class="status-icon loading">⏳</div>
+                <h1 class="loading">Verificando pago...</h1>
+                <p class="message">Estamos consultando el estado de tu transacción.</p>
+            </div>
+            
+            <!-- Success State -->
+            <div id="success-state" class="hidden">
+                <div class="status-icon">✅</div>
+                <h1 class="success">¡Pago Exitoso!</h1>
+                <p class="message">Tu pago ha sido procesado correctamente.</p>
+                <div class="details-section">
+                    <h3>Detalles del Pago</h3>
+                    <div class="detail-row">
+                        <span class="detail-label">Referencia</span>
+                        <span class="detail-value" id="success-reference">-</span>
+                    </div>
+                    <div class="detail-row">
+                        <span class="detail-label">Monto</span>
+                        <span class="detail-value" id="success-amount">-</span>
+                    </div>
+                    <div class="detail-row">
+                        <span class="detail-label">Estado</span>
+                        <span class="detail-value"><span class="status-badge approved" id="success-status">APPROVED</span></span>
+                    </div>
+                    <div class="detail-row">
+                        <span class="detail-label">Request ID</span>
+                        <span class="detail-value" id="success-requestId">-</span>
+                    </div>
+                </div>
+                <a href="/" class="btn btn-primary">← Volver al inicio</a>
+            </div>
+            
+            <!-- Rejected/Failed State -->
+            <div id="error-state" class="hidden">
+                <div class="status-icon">❌</div>
+                <h1 class="error">Pago Rechazado</h1>
+                <p class="message">Tu pago no pudo ser procesado.</p>
+                <div class="details-section">
+                    <h3>Detalles</h3>
+                    <div class="detail-row">
+                        <span class="detail-label">Referencia</span>
+                        <span class="detail-value" id="error-reference">-</span>
+                    </div>
+                    <div class="detail-row">
+                        <span class="detail-label">Estado</span>
+                        <span class="detail-value"><span class="status-badge rejected" id="error-status">REJECTED</span></span>
+                    </div>
+                    <div class="detail-row">
+                        <span class="detail-label">Request ID</span>
+                        <span class="detail-value" id="error-requestId">-</span>
+                    </div>
+                </div>
+                <a href="/" class="btn btn-primary">← Intentar nuevamente</a>
+            </div>
+            
+            <!-- Pending State -->
+            <div id="pending-state" class="hidden">
+                <div class="status-icon">⏳</div>
+                <h1 class="pending">Pago Pendiente</h1>
+                <p class="message">Tu pago está siendo procesado. Te notificaremos cuando se complete.</p>
+                <div class="details-section">
+                    <h3>Detalles</h3>
+                    <div class="detail-row">
+                        <span class="detail-label">Referencia</span>
+                        <span class="detail-value" id="pending-reference">-</span>
+                    </div>
+                    <div class="detail-row">
+                        <span class="detail-label">Estado</span>
+                        <span class="detail-value"><span class="status-badge pending" id="pending-status">PENDING</span></span>
+                    </div>
+                    <div class="detail-row">
+                        <span class="detail-label">Request ID</span>
+                        <span class="detail-value" id="pending-requestId">-</span>
+                    </div>
+                </div>
+                <a href="/" class="btn btn-primary">← Volver al inicio</a>
+                <a href="#" class="refresh-link" onclick="checkPaymentStatus(); return false;">🔄 Verificar estado nuevamente</a>
+            </div>
+            
+            <!-- Not Found State -->
+            <div id="notfound-state" class="hidden">
+                <div class="status-icon">🔍</div>
+                <h1 class="error">Pago no encontrado</h1>
+                <p class="message">No pudimos encontrar información sobre este pago.</p>
+                <div class="error-details" id="notfound-details"></div>
+                <a href="/" class="btn btn-primary">← Volver al inicio</a>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // Obtener parámetros de la URL
+        function getUrlParams() {
+            const params = new URLSearchParams(window.location.search);
+            return {
+                reference: params.get('reference'),
+                requestId: params.get('requestId') || params.get('id')
+            };
+        }
+
+        // Ocultar todos los estados
+        function hideAllStates() {
+            document.getElementById('loading-state').classList.add('hidden');
+            document.getElementById('success-state').classList.add('hidden');
+            document.getElementById('error-state').classList.add('hidden');
+            document.getElementById('pending-state').classList.add('hidden');
+            document.getElementById('notfound-state').classList.add('hidden');
+        }
+
+        // Mostrar estado específico
+        function showState(stateId) {
+            hideAllStates();
+            document.getElementById(stateId).classList.remove('hidden');
+        }
+
+        // Formatear monto
+        function formatAmount(amount, currency) {
+            return `${currency} $${amount.toLocaleString('es-CL')}`;
+        }
+
+        // Consultar estado del pago
+        async function checkPaymentStatus() {
+            const params = getUrlParams();
+            
+            if (!params.reference && !params.requestId) {
+                showState('notfound-state');
+                document.getElementById('notfound-details').textContent = 'No se proporcionó referencia ni requestId en la URL.';
+                return;
+            }
+
+            showState('loading-state');
+
+            try {
+                // Primero intentamos obtener el requestId si solo tenemos reference
+                let requestId = params.requestId;
+                
+                if (!requestId && params.reference) {
+                    // Buscar por reference usando el endpoint de status
+                    // Necesitamos el requestId, así que hacemos una búsqueda
+                    const searchResponse = await fetch(`/api/payment-by-reference/${params.reference}`);
+                    if (searchResponse.ok) {
+                        const searchData = await searchResponse.json();
+                        requestId = searchData.requestId;
+                    }
+                }
+
+                if (!requestId) {
+                    showState('notfound-state');
+                    document.getElementById('notfound-details').textContent = `No se encontró un pago con la referencia: ${params.reference}`;
+                    return;
+                }
+
+                // Consultar estado del pago
+                const response = await fetch(`/api/payment-status/${requestId}`);
+                
+                if (!response.ok) {
+                    if (response.status === 404) {
+                        showState('notfound-state');
+                        document.getElementById('notfound-details').textContent = `No se encontró el pago con ID: ${requestId}`;
+                        return;
+                    }
+                    throw new Error(`Error ${response.status}: ${response.statusText}`);
+                }
+
+                const data = await response.json();
+                
+                // Determinar qué estado mostrar basado en el status del pago
+                const status = data.status?.toUpperCase() || 'UNKNOWN';
+                
+                if (status === 'APPROVED') {
+                    showState('success-state');
+                    document.getElementById('success-reference').textContent = data.reference || '-';
+                    document.getElementById('success-amount').textContent = formatAmount(data.amount, data.currency);
+                    document.getElementById('success-status').textContent = status;
+                    document.getElementById('success-requestId').textContent = data.requestId || '-';
+                    
+                } else if (status === 'REJECTED' || status === 'FAILED') {
+                    showState('error-state');
+                    document.getElementById('error-reference').textContent = data.reference || '-';
+                    document.getElementById('error-status').textContent = status;
+                    document.getElementById('error-status').className = `status-badge ${status.toLowerCase()}`;
+                    document.getElementById('error-requestId').textContent = data.requestId || '-';
+                    
+                } else {
+                    // PENDING, CREATED, EXPIRED, o cualquier otro
+                    showState('pending-state');
+                    document.getElementById('pending-reference').textContent = data.reference || '-';
+                    document.getElementById('pending-status').textContent = status;
+                    document.getElementById('pending-status').className = `status-badge ${status.toLowerCase()}`;
+                    document.getElementById('pending-requestId').textContent = data.requestId || '-';
+                }
+
+            } catch (error) {
+                console.error('Error checking payment status:', error);
+                showState('notfound-state');
+                document.getElementById('notfound-details').textContent = `Error al consultar el pago: ${error.message}`;
+            }
+        }
+
+        // Ejecutar al cargar la página
+        document.addEventListener('DOMContentLoaded', checkPaymentStatus);
+    </script>
+</body>
+</html>

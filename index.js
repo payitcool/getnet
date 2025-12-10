@@ -1,6 +1,5 @@
 require('dotenv').config();
 const express = require('express');
-const axios = require('axios');
 const CryptoJS = require('crypto-js');
 const moment = require('moment');
 const bodyParser = require('body-parser');
@@ -11,6 +10,7 @@ const swaggerSpec = require('./config/swagger');
 const connectDB = require('./config/database');
 const Payment = require('./models/Payment');
 const AllLog = require('./models/AllLog');
+const RetryCallback = require('./models/RetryCallback');
 
 const app = express();
 const port = process.env.PORT || 3000;
@@ -59,34 +59,331 @@ console.log(`🌐 Domain: ${DOMAIN}`);
 console.log(`📚 API Docs: ${DOMAIN}/docs`);
 
 // ========================================
+// CONFIGURACIÓN DE CALLBACKS
+// ========================================
+const CALLBACK_CONFIG = {
+    TIMEOUT_MS: 10000,              // Timeout de 10 segundos
+    VALID_STATUS_CODES: [200, 201], // Códigos HTTP válidos
+    RETRY_BASE_MINUTES: 1,          // Base para backoff: intento N → espera N+1 minutos
+    BATCH_SIZE: 100                 // Máximo callbacks a procesar por ejecución del cron
+};
+
+// ========================================
+// FUNCIÓN CENTRALIZADA: Enviar callback externo
+// ========================================
+/**
+ * Función única para enviar callbacks externos.
+ * Incluye SERVER_2_SERVER_SECRET, valida 200/201, y maneja errores.
+ * 
+ * @param {Object} options - Opciones del callback
+ * @param {string} options.callbackUrl - URL del callback
+ * @param {string} options.requestId - ID de la transacción
+ * @param {string} options.reference - Referencia del pago
+ * @param {string} options.status - Estado del pago (APPROVED, etc.)
+ * @param {number} options.amount - Monto del pago
+ * @param {string} options.currency - Moneda
+ * @param {Object} options.buyer - Datos del comprador
+ * @param {boolean} options.isRetry - Si es un reintento
+ * @param {number} options.attemptNumber - Número de intento
+ * @returns {Promise<{success: boolean, statusCode: number, error?: string}>}
+ */
+async function sendCallback(options) {
+    const {
+        callbackUrl,
+        requestId,
+        reference,
+        status,
+        amount,
+        currency,
+        buyer,
+        isRetry = false,
+        attemptNumber = 1
+    } = options;
+
+    // Generar secret único por URL: sha1(SERVER_2_SERVER_SECRET + callbackUrl)
+    const secretBase = process.env.SERVER_2_SERVER_SECRET || '';
+    const secretHash = require('crypto')
+        .createHash('sha1')
+        .update(secretBase + callbackUrl)
+        .digest('hex');
+
+    const payload = {
+        secretHash,  // sha1(SERVER_2_SERVER_SECRET + callbackUrl)
+        requestId,
+        reference,
+        status,
+        amount,
+        currency,
+        buyer,
+        timestamp: new Date().toISOString(),
+        isRetry,
+        attemptNumber
+    };
+
+    const headers = {
+        'Content-Type': 'application/json',
+        'X-Getnet-RequestId': requestId,
+        'X-Attempt-Number': String(attemptNumber)
+    };
+
+    try {
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), CALLBACK_CONFIG.TIMEOUT_MS);
+
+        const response = await fetch(callbackUrl, {
+            method: 'POST',
+            headers,
+            body: JSON.stringify(payload),
+            signal: controller.signal
+        });
+
+        clearTimeout(timeoutId);
+
+        if (CALLBACK_CONFIG.VALID_STATUS_CODES.includes(response.status)) {
+            return {
+                success: true,
+                statusCode: response.status
+            };
+        } else {
+            const data = await response.json().catch(() => ({}));
+            return {
+                success: false,
+                statusCode: response.status,
+                error: data.message || data.error || `HTTP ${response.status}`
+            };
+        }
+
+    } catch (error) {
+        return {
+            success: false,
+            statusCode: 0,
+            error: error.name === 'AbortError' ? 'Timeout' : error.message
+        };
+    }
+}
+
+// ========================================
+// FUNCIÓN: Ejecutar callback y manejar resultado
+// ========================================
+/**
+ * Ejecuta el callback externo para un pago.
+ * Si falla, crea/actualiza registro en RetryCallback.
+ * Si éxito, marca el pago como callbackExecuted.
+ * 
+ * @param {Object} payment - Documento de Payment de MongoDB
+ * @returns {Promise<boolean>} - true si fue exitoso
+ */
+async function executeExternalCallback(payment) {
+    const callbackUrl = payment.externalURLCallback;
+    const requestId = payment.requestId;
+
+    console.log(`📤 Executing external callback for ${requestId}: ${callbackUrl}`);
+
+    const result = await sendCallback({
+        callbackUrl,
+        requestId,
+        reference: payment.reference,
+        status: payment.status,
+        amount: payment.amount,
+        currency: payment.currency,
+        buyer: payment.buyer,
+        isRetry: false,
+        attemptNumber: 1
+    });
+
+    if (result.success) {
+        console.log(`✅ Callback successful for ${requestId}: Status ${result.statusCode}`);
+
+        // Marcar como ejecutado exitosamente
+        payment.callbackExecuted = true;
+        await payment.save();
+
+        await logToDB('CALLBACK_SUCCESS', {
+            requestId,
+            callbackUrl,
+            statusCode: result.statusCode,
+            timestamp: new Date()
+        });
+
+        return true;
+
+    } else {
+        console.error(`❌ Callback failed for ${requestId}: ${result.error} (Status: ${result.statusCode})`);
+
+        // Calcular próximo reintento: intento 1 → espera 2 minutos, intento 9 → espera 10 minutos
+        const nextAttempt = 1; // Primer reintento
+        const minutesToWait = (nextAttempt + 1) * CALLBACK_CONFIG.RETRY_BASE_MINUTES;
+        const nextRetryAt = new Date(Date.now() + minutesToWait * 60 * 1000);
+
+        // Guardar en RetryCallback para reintentos (infinitos)
+        await RetryCallback.findOneAndUpdate(
+            { requestId },
+            {
+                $set: {
+                    reference: payment.reference,
+                    callbackUrl,
+                    status: 'PENDING',
+                    lastAttempt: new Date(),
+                    lastError: result.error,
+                    lastStatusCode: result.statusCode,
+                    nextRetryAt,
+                    paymentData: {
+                        amount: payment.amount,
+                        currency: payment.currency,
+                        paymentStatus: payment.status,
+                        buyer: payment.buyer
+                    }
+                },
+                $inc: { attempts: 1 }
+            },
+            { upsert: true, new: true }
+        );
+
+        await logToDB('CALLBACK_FAILED', {
+            requestId,
+            callbackUrl,
+            statusCode: result.statusCode,
+            error: result.error,
+            message: 'Callback failed, queued for retry',
+            timestamp: new Date()
+        });
+
+        return false;
+    }
+}
+
+/**
+ * Reintenta un callback desde RetryCallback.
+ * Reintentos infinitos con backoff: intento N → espera N+1 minutos para el próximo.
+ * 
+ * @param {Object} retryCallback - Documento de RetryCallback de MongoDB
+ * @returns {Promise<{success: boolean}>}
+ */
+async function retryCallback(retryCallback) {
+    const attemptNumber = retryCallback.attempts + 1;
+    
+    console.log(`🔄 Retrying callback for ${retryCallback.requestId} (attempt ${attemptNumber})`);
+
+    const result = await sendCallback({
+        callbackUrl: retryCallback.callbackUrl,
+        requestId: retryCallback.requestId,
+        reference: retryCallback.reference,
+        status: retryCallback.paymentData.paymentStatus,
+        amount: retryCallback.paymentData.amount,
+        currency: retryCallback.paymentData.currency,
+        buyer: retryCallback.paymentData.buyer,
+        isRetry: true,
+        attemptNumber
+    });
+
+    retryCallback.attempts = attemptNumber;
+    retryCallback.lastAttempt = new Date();
+    retryCallback.lastStatusCode = result.statusCode;
+
+    if (result.success) {
+        retryCallback.status = 'SUCCESS';
+        retryCallback.successAt = new Date();
+        retryCallback.lastError = null;
+        retryCallback.nextRetryAt = null; // Ya no necesita reintentos
+        await retryCallback.save();
+
+        // Marcar el pago como callback ejecutado
+        await Payment.updateOne(
+            { requestId: retryCallback.requestId },
+            { $set: { callbackExecuted: true } }
+        );
+
+        console.log(`✅ Callback succeeded for ${retryCallback.requestId} after ${attemptNumber} attempts`);
+
+        await logToDB('CRON_CALLBACK_SUCCESS', {
+            requestId: retryCallback.requestId,
+            callbackUrl: retryCallback.callbackUrl,
+            attempt: attemptNumber,
+            statusCode: result.statusCode
+        });
+
+        return { success: true };
+
+    } else {
+        retryCallback.lastError = result.error;
+
+        // Calcular próximo reintento con backoff: intento N → espera N+1 minutos
+        const minutesToWait = (attemptNumber + 1) * CALLBACK_CONFIG.RETRY_BASE_MINUTES;
+        retryCallback.nextRetryAt = new Date(Date.now() + minutesToWait * 60 * 1000);
+
+        console.log(`❌ Callback failed for ${retryCallback.requestId}: ${result.error}`);
+        console.log(`   ⏰ Next retry in ${minutesToWait} minutes (attempt ${attemptNumber + 1})`);
+
+        await retryCallback.save();
+
+        await logToDB('CRON_CALLBACK_FAILED', {
+            requestId: retryCallback.requestId,
+            callbackUrl: retryCallback.callbackUrl,
+            attempt: attemptNumber,
+            statusCode: result.statusCode,
+            error: result.error,
+            nextRetryAt: retryCallback.nextRetryAt,
+            minutesToNextRetry: minutesToWait
+        });
+
+        return { success: false };
+    }
+}
+
+// ========================================
 // FUNCIÓN PRINCIPAL: Ejecutar lógica cuando el pago es exitoso
 // ========================================
 /**
  * Esta función se ejecuta UNA VEZ cuando un pago es confirmado como APPROVED.
- * Aquí puedes agregar tu lógica de negocio:
- * - Enviar email de confirmación
- * - Activar servicio/producto
- * - Actualizar inventario
- * - Generar factura
- * - Notificar a otros sistemas
+ * Si el pago tiene un externalURLCallback configurado, lo ejecuta.
+ * Si falla, guarda en RetryCallback para reintentos.
  * 
  * @param {string} transactionId - El requestId de Getnet (obtenido en la creación del pago)
  */
 async function paymentSuccessful(transactionId) {
     console.log(`✅ [PAYMENT SUCCESSFUL] Transaction ID: ${transactionId}`);
     
-    // TODO: Implementar tu lógica de negocio aquí
-    // Ejemplo:
-    // await sendConfirmationEmail(transactionId);
-    // await activateService(transactionId);
-    // await updateInventory(transactionId);
-    
-    // Por ahora solo registra en logs
-    await logToDB('INFO', {
-        message: 'Payment successful - Business logic executed',
-        requestId: transactionId,
-        timestamp: new Date()
-    });
+    try {
+        // Buscar el pago en la base de datos
+        const payment = await Payment.findOne({ requestId: transactionId });
+        
+        if (!payment) {
+            console.error(`❌ Payment not found for transactionId: ${transactionId}`);
+            return;
+        }
+
+        // Si ya se ejecutó el callback, no hacer nada
+        if (payment.callbackExecuted) {
+            console.log(`ℹ️  Callback already executed for ${transactionId}`);
+            return;
+        }
+
+        // Si tiene externalURLCallback, ejecutarlo
+        if (payment.externalURLCallback) {
+            await executeExternalCallback(payment);
+        } else {
+            // Marcar como ejecutado (no tiene callback)
+            payment.callbackExecuted = true;
+            await payment.save();
+            console.log(`ℹ️  No external callback configured for ${transactionId}`);
+        }
+
+        await logToDB('INFO', {
+            message: 'Payment successful - Business logic executed',
+            requestId: transactionId,
+            hasCallback: !!payment.externalURLCallback,
+            timestamp: new Date()
+        });
+
+    } catch (error) {
+        console.error(`❌ Error in paymentSuccessful: ${error.message}`);
+        await logToDB('ERROR', {
+            message: 'Error in paymentSuccessful',
+            requestId: transactionId,
+            error: error.message,
+            timestamp: new Date()
+        });
+    }
 }
 
 // Helper function to log to database
@@ -104,6 +401,102 @@ async function logToDB(type, data) {
 
 app.get('/', (req, res) => {
     res.sendFile(path.join(__dirname, 'views/index.html'));
+});
+
+// ========================================
+// HEALTH CHECK: Para Docker y Kubernetes
+// ========================================
+/**
+ * @swagger
+ * /healthz:
+ *   get:
+ *     summary: Health check del servicio
+ *     description: |
+ *       Verifica que el servicio esté funcionando correctamente.
+ *       Realiza una consulta a MongoDB con timeout de 2 segundos.
+ *       
+ *       **Uso en Docker:**
+ *       ```dockerfile
+ *       HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+ *         CMD curl -f http://localhost:3000/healthz || exit 1
+ *       ```
+ *     tags: [Health]
+ *     responses:
+ *       200:
+ *         description: Servicio saludable
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 status:
+ *                   type: string
+ *                   example: "ok"
+ *                 timestamp:
+ *                   type: string
+ *                   format: date-time
+ *                 uptime:
+ *                   type: number
+ *                   description: Tiempo en segundos desde que inició el servidor
+ *                 mongodb:
+ *                   type: string
+ *                   example: "connected"
+ *                 responseTime:
+ *                   type: string
+ *                   example: "15ms"
+ *       503:
+ *         description: Servicio no saludable
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 status:
+ *                   type: string
+ *                   example: "error"
+ *                 error:
+ *                   type: string
+ *                 mongodb:
+ *                   type: string
+ *                   example: "disconnected"
+ */
+app.get('/healthz', async (req, res) => {
+    const startTime = Date.now();
+    const TIMEOUT_MS = 2000;
+
+    try {
+        // Crear una promesa con timeout
+        const dbCheck = Payment.findOne({}).limit(1).lean().exec();
+        
+        const timeoutPromise = new Promise((_, reject) => {
+            setTimeout(() => reject(new Error('Database query timeout (>2s)')), TIMEOUT_MS);
+        });
+
+        // Race: quien termine primero
+        await Promise.race([dbCheck, timeoutPromise]);
+
+        const responseTime = Date.now() - startTime;
+
+        res.status(200).json({
+            status: 'ok',
+            timestamp: new Date().toISOString(),
+            uptime: Math.floor(process.uptime()),
+            mongodb: 'connected',
+            responseTime: `${responseTime}ms`
+        });
+
+    } catch (error) {
+        const responseTime = Date.now() - startTime;
+
+        res.status(503).json({
+            status: 'error',
+            timestamp: new Date().toISOString(),
+            uptime: Math.floor(process.uptime()),
+            mongodb: 'disconnected',
+            error: error.message,
+            responseTime: `${responseTime}ms`
+        });
+    }
 });
 
 function getnetAuth() {
@@ -130,24 +523,33 @@ function getnetAuth() {
 async function queryPaymentStatus(requestId) {
     try {
         const auth = getnetAuth();
-        const response = await axios.post(`${GETNET_URL}/api/session/${requestId}`, { auth });
+        const response = await fetch(`${GETNET_URL}/api/session/${requestId}`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ auth })
+        });
+        
+        const data = await response.json();
         
         await logToDB('STATUS_QUERY', {
             requestId,
             endpoint: `/api/session/${requestId}`,
             method: 'POST',
             statusCode: response.status,
-            response: response.data
+            response: data
         });
 
-        return response.data;
+        if (!response.ok) {
+            throw new Error(data.message || `HTTP ${response.status}`);
+        }
+
+        return data;
     } catch (error) {
         await logToDB('ERROR', {
             requestId,
             endpoint: `/api/session/${requestId}`,
             method: 'POST',
-            error: error.message,
-            response: error.response?.data
+            error: error.message
         });
         throw error;
     }
@@ -155,45 +557,172 @@ async function queryPaymentStatus(requestId) {
 
 /**
  * @swagger
- * /create-payment:
+ * /api/create-payment:
  *   post:
  *     summary: Crear nueva sesión de pago
  *     description: Crea una nueva sesión de pago en Getnet y redirige al usuario al checkout. Guarda el requestId en la base de datos.
  *     tags: [Payments]
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required:
+ *               - amount
+ *               - buyer
+ *             properties:
+ *               amount:
+ *                 type: number
+ *                 description: Monto del pago en CLP
+ *                 example: 5000
+ *               currency:
+ *                 type: string
+ *                 description: Moneda del pago (por defecto CLP)
+ *                 default: CLP
+ *                 example: CLP
+ *               description:
+ *                 type: string
+ *                 description: Descripción del pago
+ *                 example: Compra en tienda online
+ *               reference:
+ *                 type: string
+ *                 description: Referencia única del pedido (si no se envía, se genera automáticamente)
+ *                 example: ORDER-12345
+ *               buyer:
+ *                 type: object
+ *                 required:
+ *                   - name
+ *                   - email
+ *                 properties:
+ *                   name:
+ *                     type: string
+ *                     description: Nombre del comprador
+ *                     example: Juan
+ *                   surname:
+ *                     type: string
+ *                     description: Apellido del comprador
+ *                     example: Pérez
+ *                   email:
+ *                     type: string
+ *                     format: email
+ *                     description: Email del comprador
+ *                     example: juan@ejemplo.com
+ *                   mobile:
+ *                     type: string
+ *                     description: Teléfono móvil del comprador
+ *                     example: "+56912345678"
+ *               expirationMinutes:
+ *                 type: integer
+ *                 description: Minutos hasta que expire la sesión de pago
+ *                 default: 10
+ *                 example: 10
+ *               returnUrl:
+ *                 type: string
+ *                 description: URL de retorno personalizada (opcional)
+ *                 example: https://mitienda.com/resultado
+ *               externalURLCallback:
+ *                 type: string
+ *                 format: uri
+ *                 description: |
+ *                   URL externa que será llamada (POST) cuando el pago sea exitoso (APPROVED).
+ *                   Se envíará un JSON con los datos del pago. Si falla, se reintentará automáticamente.
+ *                 example: https://tu-app.com/webhook/pago-exitoso
+ *               redirect:
+ *                 type: boolean
+ *                 description: Si es true, redirige al checkout. Si es false, devuelve JSON con la URL.
+ *                 default: true
+ *                 example: false
  *     responses:
+ *       200:
+ *         description: Sesión de pago creada (cuando redirect=false)
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success:
+ *                   type: boolean
+ *                   example: true
+ *                 requestId:
+ *                   type: string
+ *                   example: "abc123xyz456"
+ *                 reference:
+ *                   type: string
+ *                   example: "ORDER-1702069200000"
+ *                 processUrl:
+ *                   type: string
+ *                   example: "https://checkout.getnet.cl/session/abc123xyz456"
  *       302:
- *         description: Redirección al checkout de Getnet
+ *         description: Redirección al checkout de Getnet (cuando redirect=true o no se especifica)
+ *       400:
+ *         description: Parámetros faltantes o inválidos
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 error:
+ *                   type: string
+ *                   example: "Missing required fields"
+ *                 required:
+ *                   type: array
+ *                   items:
+ *                     type: string
+ *                   example: ["amount", "buyer.name", "buyer.email"]
  *       500:
  *         description: Error al crear la sesión de pago
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/Error'
  */
-app.post('/create-payment', async (req, res) => {
+app.post('/api/create-payment', async (req, res) => {
     try {
+        // Validar campos requeridos
+        const { amount, buyer, description, reference: customReference, currency, expirationMinutes, returnUrl: customReturnUrl, redirect, externalURLCallback } = req.body;
+        
+        const missingFields = [];
+        if (!amount) missingFields.push('amount');
+        if (!buyer) missingFields.push('buyer');
+        if (buyer && !buyer.name) missingFields.push('buyer.name');
+        if (buyer && !buyer.email) missingFields.push('buyer.email');
+        // document es opcional - Getnet lo acepta vacío
+        
+        if (missingFields.length > 0) {
+            return res.status(400).json({
+                error: 'Missing required fields',
+                required: missingFields
+            });
+        }
+
         const auth = getnetAuth();
-        const reference = 'ORDER-' + Date.now();
+        const reference = customReference || 'ORDER-' + Date.now();
+        const paymentCurrency = currency || 'CLP';
+        const paymentDescription = description || `Pago de ${paymentCurrency} $${amount}`;
+        const expMinutes = expirationMinutes || 10;
+        const shouldRedirect = redirect !== false; // Por defecto redirige
         
         // Payment request with notificationUrl
         const paymentData = {
             auth: auth,
             locale: 'es_CL',
             buyer: {
-                name: 'Hugo',
-                surname: 'User',
-                email: 'test@example.com',
-                document: '11111111-1',
-                documentType: 'RUT',
-                mobile: '+56912345678'
+                name: buyer.name,
+                surname: buyer.surname || '',
+                email: buyer.email,
+                mobile: buyer.mobile || ''
             },
-
             payment: {
                 reference: reference,
-                description: 'Pago de prueba 5000 CLP',
+                description: paymentDescription,
                 amount: {
-                    currency: 'CLP',
-                    total: 5000
+                    currency: paymentCurrency,
+                    total: amount
                 }
             },
-            expiration: moment().add(10, 'minutes').toISOString(),
-            returnUrl: `${DOMAIN}/response?reference=${reference}`,
+            expiration: moment().add(expMinutes, 'minutes').toISOString(),
+            returnUrl: customReturnUrl || `${DOMAIN}/response?reference=${reference}`,
             notificationUrl: `${DOMAIN}/api/notification`,
             ipAddress: req.ip || '127.0.0.1',
             userAgent: req.headers['user-agent'] || 'Unknown'
@@ -201,51 +730,75 @@ app.post('/create-payment', async (req, res) => {
 
         console.log('📤 Sending request to Getnet:', JSON.stringify(paymentData, null, 2));
 
-        const response = await axios.post(`${GETNET_URL}/api/session`, paymentData);
+        const response = await fetch(`${GETNET_URL}/api/session`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(paymentData)
+        });
+        
+        const responseData = await response.json();
 
-        console.log('📥 Getnet Response:', response.data);
+        console.log('📥 Getnet Response:', responseData);
 
-        if (response.data && response.data.requestId) {
+        if (!response.ok) {
+            throw new Error(responseData.message || `Getnet error: ${response.status}`);
+        }
+
+        if (responseData && responseData.requestId) {
             // Save to MongoDB
             const payment = await Payment.create({
-                requestId: response.data.requestId,
+                requestId: responseData.requestId,
                 reference: reference,
-                amount: 5000,
-                currency: 'CLP',
+                amount: amount,
+                currency: paymentCurrency,
                 status: 'CREATED',
                 buyer: paymentData.buyer,
-                processUrl: response.data.processUrl,
-                getnetResponse: response.data,
+                externalURLCallback: externalURLCallback || null,
+                callbackExecuted: false,
+                processUrl: responseData.processUrl,
+                getnetResponse: responseData,
                 lastStatusUpdate: new Date()
             });
 
             await logToDB('PAYMENT_CREATED', {
-                requestId: response.data.requestId,
+                requestId: responseData.requestId,
                 endpoint: '/api/session',
                 method: 'POST',
                 statusCode: response.status,
                 request: paymentData,
-                response: response.data,
+                response: responseData,
                 ip: req.ip,
                 userAgent: req.headers['user-agent']
             });
 
             console.log('✅ Payment saved to DB:', payment._id);
 
-            if (response.data.processUrl) {
-                res.redirect(response.data.processUrl);
+            if (responseData.processUrl) {
+                // Si redirect=false, devolver JSON en lugar de redirigir
+                if (!shouldRedirect) {
+                    return res.json({
+                        success: true,
+                        requestId: responseData.requestId,
+                        reference: reference,
+                        processUrl: responseData.processUrl,
+                        amount: amount,
+                        currency: paymentCurrency,
+                        expiresAt: paymentData.expiration
+                    });
+                }
+                res.redirect(responseData.processUrl);
             } else {
-                res.status(500).send('Error: No processUrl in response');
+                res.status(500).json({ error: 'No processUrl in response', data: response.data });
             }
         } else {
-            res.status(500).send('Error creating payment session: ' + JSON.stringify(response.data));
+            res.status(500).json({ error: 'Error creating payment session', data: response.data });
         }
 
     } catch (error) {
         console.error('❌ Error connecting to Getnet:', error.response ? error.response.data : error.message);
         
         await logToDB('ERROR', {
-            endpoint: '/create-payment',
+            endpoint: '/api/create-payment',
             method: 'POST',
             error: error.message,
             response: error.response?.data,
@@ -253,7 +806,10 @@ app.post('/create-payment', async (req, res) => {
             userAgent: req.headers['user-agent']
         });
 
-        res.status(500).send('Error connecting to Getnet: ' + (error.response ? JSON.stringify(error.response.data) : error.message));
+        res.status(500).json({ 
+            error: 'Error connecting to Getnet', 
+            message: error.response ? error.response.data : error.message 
+        });
     }
 });
 
@@ -265,7 +821,11 @@ app.post('/create-payment', async (req, res) => {
  * /api/notification:
  *   post:
  *     summary: Webhook para recibir notificaciones de Getnet
- *     description: Endpoint público que recibe notificaciones automáticas cuando el estado de un pago cambia. Getnet envía POST a esta URL cuando hay actualizaciones.
+ *     description: |
+ *       Endpoint público que recibe notificaciones automáticas cuando el estado de un pago cambia.
+ *       Getnet envía POST a esta URL cuando hay actualizaciones.
+ *       
+ *       **Importante:** Este endpoint debe ser accesible públicamente desde internet para que Getnet pueda enviar las notificaciones.
  *     tags: [Webhooks]
  *     requestBody:
  *       required: true
@@ -273,16 +833,47 @@ app.post('/create-payment', async (req, res) => {
  *         application/json:
  *           schema:
  *             type: object
+ *             required:
+ *               - requestId
  *             properties:
  *               requestId:
  *                 type: string
- *                 description: ID de la transacción
+ *                 description: ID único de la transacción en Getnet
+ *                 example: "abc123xyz456"
+ *               reference:
+ *                 type: string
+ *                 description: Referencia del pedido enviada en la creación
+ *                 example: "ORDER-1702069200000"
+ *               signature:
+ *                 type: string
+ *                 description: Firma SHA-256 para validar autenticidad (SHA-256(requestId + status + date + secretKey))
+ *                 example: "a1b2c3d4e5f6..."
+ *               date:
+ *                 type: string
+ *                 format: date-time
+ *                 description: Fecha de la notificación
+ *                 example: "2024-12-10T15:30:00Z"
  *               status:
  *                 type: object
+ *                 description: Objeto con el estado del pago
  *                 properties:
  *                   status:
  *                     type: string
- *                     enum: [PENDING, APPROVED, REJECTED, FAILED]
+ *                     enum: [PENDING, APPROVED, REJECTED, FAILED, EXPIRED]
+ *                     description: Estado actual del pago
+ *                     example: "APPROVED"
+ *                   reason:
+ *                     type: string
+ *                     description: Razón del estado (código)
+ *                     example: "00"
+ *                   message:
+ *                     type: string
+ *                     description: Mensaje descriptivo del estado
+ *                     example: "Transacción aprobada"
+ *                   date:
+ *                     type: string
+ *                     format: date-time
+ *                     description: Fecha del cambio de estado
  *     responses:
  *       200:
  *         description: Notificación recibida y procesada correctamente
@@ -293,12 +884,46 @@ app.post('/create-payment', async (req, res) => {
  *               properties:
  *                 success:
  *                   type: boolean
+ *                   example: true
  *                 message:
  *                   type: string
- *       404:
- *         description: Pago no encontrado
+ *                   example: "Notification received"
  *       400:
  *         description: requestId faltante
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 error:
+ *                   type: string
+ *                   example: "Missing requestId"
+ *       401:
+ *         description: Firma inválida
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 error:
+ *                   type: string
+ *                   example: "Invalid signature"
+ *       404:
+ *         description: Pago no encontrado en la base de datos
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 error:
+ *                   type: string
+ *                   example: "Payment not found"
+ *       500:
+ *         description: Error interno del servidor
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/Error'
  */
 app.post('/api/notification', async (req, res) => {
     try {
@@ -311,11 +936,11 @@ app.post('/api/notification', async (req, res) => {
         }
 
         // Validar signature según el manual de Getnet
-        // SHA-1(requestId + status.status + status.date + secretKey)
+        // SHA-256(requestId + status + date + secretKey)
         if (signature) {
             const statusStr = status?.status || '';
-            const dateStr = status?.date || new Date().toISOString();
-            const calculatedSignature = CryptoJS.SHA1(
+            const dateStr = req.body.date || new Date().toISOString();
+            const calculatedSignature = CryptoJS.SHA256(
                 `${requestId}${statusStr}${dateStr}${SECRET_KEY}`
             ).toString();
             
@@ -417,7 +1042,13 @@ app.post('/api/notification', async (req, res) => {
  * /api/payment-status/{requestId}:
  *   get:
  *     summary: Consultar estado de un pago
- *     description: Consulta el estado actual de un pago en Getnet API y actualiza la base de datos con la información más reciente.
+ *     description: |
+ *       Consulta el estado actual de un pago en Getnet API y actualiza la base de datos con la información más reciente.
+ *       
+ *       **Uso recomendado:**
+ *       - Después de que el usuario regrese del checkout para confirmar el estado
+ *       - Para verificar pagos que quedaron en estado PENDING
+ *       - Para debugging y soporte al cliente
  *     tags: [Payments]
  *     parameters:
  *       - in: path
@@ -426,6 +1057,7 @@ app.post('/api/notification', async (req, res) => {
  *         schema:
  *           type: string
  *         description: ID de la transacción (requestId de Getnet)
+ *         example: "abc123xyz456"
  *     responses:
  *       200:
  *         description: Estado del pago obtenido exitosamente
@@ -436,23 +1068,56 @@ app.post('/api/notification', async (req, res) => {
  *               properties:
  *                 success:
  *                   type: boolean
+ *                   example: true
  *                 requestId:
  *                   type: string
+ *                   example: "abc123xyz456"
  *                 reference:
  *                   type: string
+ *                   example: "ORDER-1702069200000"
  *                 status:
  *                   type: string
+ *                   enum: [CREATED, PENDING, APPROVED, REJECTED, FAILED, EXPIRED]
+ *                   example: "APPROVED"
  *                 amount:
  *                   type: number
+ *                   example: 5000
  *                 currency:
  *                   type: string
+ *                   example: "CLP"
  *                 lastUpdate:
  *                   type: string
  *                   format: date-time
+ *                   example: "2024-12-10T15:30:00.000Z"
+ *                 getnetData:
+ *                   type: object
+ *                   description: Respuesta completa de Getnet API
  *       404:
- *         description: Pago no encontrado
+ *         description: Pago no encontrado en la base de datos
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 error:
+ *                   type: string
+ *                   example: "Payment not found"
+ *                 requestId:
+ *                   type: string
+ *                   example: "abc123xyz456"
  *       500:
- *         description: Error al consultar el estado
+ *         description: Error al consultar el estado en Getnet
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 error:
+ *                   type: string
+ *                   example: "Error querying payment status"
+ *                 message:
+ *                   type: string
+ *                   example: "Request failed with status code 401"
  */
 app.get('/api/payment-status/:requestId', async (req, res) => {
     try {
@@ -503,21 +1168,29 @@ app.get('/api/payment-status/:requestId', async (req, res) => {
 });
 
 // ========================================
-// RETURN URL: User returns from Getnet checkout
+// RETURN URL: User returns from Getnet checkout (Static HTML)
 // ========================================
 /**
  * @swagger
  * /response:
  *   get:
  *     summary: Página de retorno después del pago
- *     description: URL a la que regresa el usuario después de completar o cancelar el pago en Getnet. Verifica el estado real del pago antes de mostrar el resultado.
+ *     description: |
+ *       URL a la que regresa el usuario después de completar o cancelar el pago en Getnet.
+ *       Sirve una página HTML estática que usa JavaScript para consultar el estado del pago
+ *       mediante las APIs existentes.
  *     tags: [Payments]
  *     parameters:
+ *       - in: query
+ *         name: reference
+ *         schema:
+ *           type: string
+ *         description: Referencia del pedido (enviado en returnUrl)
  *       - in: query
  *         name: requestId
  *         schema:
  *           type: string
- *         description: ID de la transacción (enviado por Getnet)
+ *         description: ID de la transacción de Getnet (alternativo)
  *     responses:
  *       200:
  *         description: Página HTML con el resultado del pago
@@ -526,212 +1199,30 @@ app.get('/api/payment-status/:requestId', async (req, res) => {
  *             schema:
  *               type: string
  */
-app.get('/response', async (req, res) => {
-    try {
-        // Getnet redirige con el reference que enviamos en returnUrl
-        const reference = req.query.reference;
-        const requestId = req.query.requestId || req.query.id;
-
-        console.log('🔄 User returned from Getnet:', { reference, requestId });
-
-        // Buscar pago por reference (recomendado) o requestId
-        let payment;
-        if (reference) {
-            payment = await Payment.findOne({ reference });
-        } else if (requestId) {
-            payment = await Payment.findOne({ requestId });
-        }
-
-        if (!payment) {
-            return res.send(`
-                <html>
-                <head>
-                    <title>Error - Getnet</title>
-                    <style>
-                        body { font-family: Arial, sans-serif; max-width: 600px; margin: 50px auto; padding: 20px; }
-                        .error { background: #f8d7da; color: #721c24; padding: 20px; border-radius: 5px; }
-                    </style>
-                </head>
-                <body>
-                    <div class="error">
-                        <h1>❌ Error</h1>
-                        <p>No se encontró el pago. Reference: ${reference || 'N/A'}</p>
-                        <a href="/">Volver al inicio</a>
-                    </div>
-                </body>
-                </html>
-            `);
-        }
-
-        console.log(`🔄 Payment found: ${payment.requestId}`);
-
-        // Query current payment status from Getnet
-        const requestIdToQuery = payment.requestId;
-        
-        if (payment) {
-            try {
-                const getnetStatus = await queryPaymentStatus(requestId);
-                
-                if (getnetStatus.status && getnetStatus.status.status) {
-                    const oldStatus = payment.status;
-                    payment.status = getnetStatus.status.status;
-                    payment.lastStatusUpdate = new Date();
-                    payment.getnetResponse = getnetStatus;
-                    await payment.save();
-
-                    // Si el pago cambió a APPROVED, ejecutar lógica de negocio
-                    if (payment.status === 'APPROVED' && oldStatus !== 'APPROVED') {
-                        await paymentSuccessful(requestIdToQuery);
-                    }
-                }
-            } catch (error) {
-                console.error('Error querying Getnet status:', error.message);
-            }
-        }
-
-        // Generate response based on status
-        const status = payment?.status || 'UNKNOWN';
-        let html = '';
-
-        if (status === 'APPROVED') {
-            html = `
-                <html>
-                <head>
-                    <title>Pago Exitoso - Getnet</title>
-                    <style>
-                        body { font-family: Arial, sans-serif; max-width: 600px; margin: 50px auto; padding: 20px; }
-                        .success { background: #d4edda; color: #155724; padding: 20px; border-radius: 5px; }
-                        .info { background: #f8f9fa; padding: 15px; margin-top: 20px; border-radius: 5px; }
-                        table { width: 100%; margin-top: 15px; }
-                        td { padding: 5px; }
-                        .label { font-weight: bold; }
-                    </style>
-                </head>
-                <body>
-                    <div class="success">
-                        <h1>✅ Pago Exitoso</h1>
-                        <p>Tu pago ha sido procesado correctamente.</p>
-                    </div>
-                    <div class="info">
-                        <h3>Detalles del Pago</h3>
-                        <table>
-                            <tr><td class="label">Referencia:</td><td>${payment.reference}</td></tr>
-                            <tr><td class="label">Monto:</td><td>${payment.currency} $${payment.amount.toLocaleString()}</td></tr>
-                            <tr><td class="label">Estado:</td><td>${payment.status}</td></tr>
-                            <tr><td class="label">Request ID:</td><td>${payment.requestId}</td></tr>
-                        </table>
-                    </div>
-                    <br>
-                    <a href="/">← Volver al inicio</a>
-                </body>
-                </html>
-            `;
-        } else if (status === 'REJECTED' || status === 'FAILED') {
-            html = `
-                <html>
-                <head>
-                    <title>Pago Rechazado - Getnet</title>
-                    <style>
-                        body { font-family: Arial, sans-serif; max-width: 600px; margin: 50px auto; padding: 20px; }
-                        .error { background: #f8d7da; color: #721c24; padding: 20px; border-radius: 5px; }
-                        .info { background: #f8f9fa; padding: 15px; margin-top: 20px; border-radius: 5px; }
-                        table { width: 100%; margin-top: 15px; }
-                        td { padding: 5px; }
-                        .label { font-weight: bold; }
-                    </style>
-                </head>
-                <body>
-                    <div class="error">
-                        <h1>❌ Pago Rechazado</h1>
-                        <p>Tu pago no pudo ser procesado.</p>
-                    </div>
-                    <div class="info">
-                        <h3>Detalles</h3>
-                        <table>
-                            <tr><td class="label">Referencia:</td><td>${payment?.reference || 'N/A'}</td></tr>
-                            <tr><td class="label">Estado:</td><td>${status}</td></tr>
-                            <tr><td class="label">Request ID:</td><td>${requestId}</td></tr>
-                        </table>
-                    </div>
-                    <br>
-                    <a href="/">← Intentar nuevamente</a>
-                </body>
-                </html>
-            `;
-        } else {
-            // PENDING, EXPIRED, or UNKNOWN
-            html = `
-                <html>
-                <head>
-                    <title>Pago Pendiente - Getnet</title>
-                    <style>
-                        body { font-family: Arial, sans-serif; max-width: 600px; margin: 50px auto; padding: 20px; }
-                        .warning { background: #fff3cd; color: #856404; padding: 20px; border-radius: 5px; }
-                        .info { background: #f8f9fa; padding: 15px; margin-top: 20px; border-radius: 5px; }
-                        table { width: 100%; margin-top: 15px; }
-                        td { padding: 5px; }
-                        .label { font-weight: bold; }
-                    </style>
-                </head>
-                <body>
-                    <div class="warning">
-                        <h1>⏳ Pago Pendiente</h1>
-                        <p>Tu pago está siendo procesado. Te notificaremos cuando se complete.</p>
-                    </div>
-                    <div class="info">
-                        <h3>Detalles</h3>
-                        <table>
-                            <tr><td class="label">Referencia:</td><td>${payment?.reference || 'N/A'}</td></tr>
-                            <tr><td class="label">Estado:</td><td>${status}</td></tr>
-                            <tr><td class="label">Request ID:</td><td>${payment?.requestId || 'N/A'}</td></tr>
-                        </table>
-                        <p style="margin-top: 15px;">
-                            <a href="/api/payment-status/${payment?.requestId}" target="_blank">Ver estado actualizado (JSON)</a>
-                        </p>
-                    </div>
-                    <br>
-                    <a href="/">← Volver al inicio</a>
-                </body>
-                </html>
-            `;
-        }
-
-        res.send(html);
-    } catch (error) {
-        console.error('❌ Error in /response:', error.message);
-        res.status(500).send(`
-            <html>
-            <head><title>Error</title></head>
-            <body>
-                <h1>Error procesando respuesta</h1>
-                <p>${error.message}</p>
-                <a href="/">Volver</a>
-            </body>
-            </html>
-        `);
-    }
+app.get('/response', (req, res) => {
+    res.sendFile(path.join(__dirname, 'views/response.html'));
 });
 
 // ========================================
-// ENDPOINT CRON: Reconciliación inteligente de pagos
+// API: Get payment by reference
 // ========================================
 /**
  * @swagger
- * /api/cron:
+ * /api/payment-by-reference/{reference}:
  *   get:
- *     summary: Reconciliación automática de pagos pendientes
- *     description: Revisa todos los pagos PENDING, CREATED o APPROVED de los últimos 7 días y actualiza su estado consultando a Getnet. Es inteligente y solo revisa transacciones recientes.
- *     tags: [Reconciliation]
+ *     summary: Buscar pago por referencia
+ *     description: Busca un pago en la base de datos usando la referencia del pedido y actualiza su estado consultando a Getnet.
+ *     tags: [Payments]
  *     parameters:
- *       - in: query
- *         name: days
+ *       - in: path
+ *         name: reference
+ *         required: true
  *         schema:
- *           type: integer
- *           default: 7
- *         description: Número de días hacia atrás para revisar (máximo 30)
+ *           type: string
+ *         description: Referencia del pedido (ej. ORDER-1702069200000)
  *     responses:
  *       200:
- *         description: Reconciliación completada exitosamente
+ *         description: Pago encontrado
  *         content:
  *           application/json:
  *             schema:
@@ -739,114 +1230,305 @@ app.get('/response', async (req, res) => {
  *               properties:
  *                 success:
  *                   type: boolean
- *                 message:
+ *                 requestId:
  *                   type: string
- *                 paymentsChecked:
- *                   type: integer
- *                 paymentsUpdated:
- *                   type: integer
- *                 updates:
- *                   type: array
- *                   items:
- *                     type: object
- *       500:
- *         description: Error en la reconciliación
+ *                 reference:
+ *                   type: string
+ *                 status:
+ *                   type: string
+ *                 amount:
+ *                   type: number
+ *                 currency:
+ *                   type: string
+ *       404:
+ *         description: Pago no encontrado
  */
-app.get('/api/cron', async (req, res) => {
+app.get('/api/payment-by-reference/:reference', async (req, res) => {
     try {
-        const daysBack = Math.min(parseInt(req.query.days) || 7, 30); // Máximo 30 días
-        const cutoffDate = moment().subtract(daysBack, 'days').toDate();
+        const { reference } = req.params;
         
-        console.log(`🔄 [CRON] Starting reconciliation for last ${daysBack} days...`);
-
-        // Buscar solo pagos que podrían necesitar actualización
-        // Estados que valen la pena revisar: CREATED, PENDING, APPROVED
-        const paymentsToCheck = await Payment.find({
-            status: { $in: ['CREATED', 'PENDING', 'APPROVED'] },
-            createdAt: { $gte: cutoffDate }
-        }).sort({ createdAt: -1 });
-
-        console.log(`📊 Found ${paymentsToCheck.length} payments to check`);
-
-        const updates = [];
-        let updatedCount = 0;
-
-        for (const payment of paymentsToCheck) {
-            try {
-                // Consultar estado actual en Getnet
-                const getnetStatus = await queryPaymentStatus(payment.requestId);
-                
-                const newStatus = getnetStatus.status?.status;
-                const oldStatus = payment.status;
-
-                // Solo actualizar si el estado cambió
-                if (newStatus && newStatus !== oldStatus) {
-                    payment.status = newStatus;
-                    payment.lastStatusUpdate = new Date();
-                    payment.getnetResponse = getnetStatus;
-                    await payment.save();
-
-                    updatedCount++;
-                    updates.push({
-                        requestId: payment.requestId,
-                        reference: payment.reference,
-                        oldStatus,
-                        newStatus,
-                        updatedAt: new Date()
-                    });
-
-                    console.log(`✅ Updated ${payment.requestId}: ${oldStatus} → ${newStatus}`);
-
-                    // Si el pago cambió a APPROVED, ejecutar lógica de negocio
-                    if (newStatus === 'APPROVED' && oldStatus !== 'APPROVED') {
-                        await paymentSuccessful(payment.requestId);
-                    }
-                }
-
-                // Pequeña pausa para no saturar la API de Getnet
-                await new Promise(resolve => setTimeout(resolve, 200));
-
-            } catch (error) {
-                console.error(`❌ Error checking ${payment.requestId}:`, error.message);
-                await logToDB('ERROR', {
-                    requestId: payment.requestId,
-                    endpoint: '/api/cron',
-                    error: error.message,
-                    message: 'Error during reconciliation'
-                });
-            }
+        const payment = await Payment.findOne({ reference });
+        
+        if (!payment) {
+            return res.status(404).json({
+                error: 'Payment not found',
+                reference
+            });
         }
 
-        const result = {
+        // Intentar actualizar el estado desde Getnet
+        try {
+            const getnetStatus = await queryPaymentStatus(payment.requestId);
+            
+            if (getnetStatus.status && getnetStatus.status.status) {
+                const oldStatus = payment.status;
+                payment.status = getnetStatus.status.status;
+                payment.lastStatusUpdate = new Date();
+                payment.getnetResponse = getnetStatus;
+                await payment.save();
+
+                // Si el pago cambió a APPROVED, ejecutar callback
+                if (payment.status === 'APPROVED' && oldStatus !== 'APPROVED') {
+                    await paymentSuccessful(payment.requestId);
+                }
+            }
+        } catch (error) {
+            console.error('Error querying Getnet status:', error.message);
+        }
+
+        res.json({
             success: true,
-            message: `Reconciliation completed for last ${daysBack} days`,
-            paymentsChecked: paymentsToCheck.length,
-            paymentsUpdated: updatedCount,
-            updates: updates
-        };
-
-        console.log(`✅ [CRON] Reconciliation completed: ${updatedCount}/${paymentsToCheck.length} updated`);
-
-        await logToDB('INFO', {
-            endpoint: '/api/cron',
-            message: 'Reconciliation completed',
-            ...result
+            requestId: payment.requestId,
+            reference: payment.reference,
+            status: payment.status,
+            amount: payment.amount,
+            currency: payment.currency,
+            lastUpdate: payment.lastStatusUpdate
         });
 
-        res.json(result);
+    } catch (error) {
+        console.error('❌ Error getting payment by reference:', error.message);
+        res.status(500).json({
+            error: 'Error getting payment',
+            message: error.message
+        });
+    }
+});
+
+// ========================================
+// ENDPOINT CRON: Reconciliación inteligente de pagos + Reintentos de callbacks
+// ========================================
+/**
+ * @swagger
+ * /api/cron:
+ *   get:
+ *     summary: Reconciliación automática y reintentos de callbacks
+ *     description: |
+ *       Ejecuta dos tareas importantes:
+ *       
+ *       **1. Reconciliación de pagos:** Revisa todos los pagos PENDING o CREATED de los últimos N días 
+ *       y actualiza su estado consultando a Getnet. Si un pago cambia a APPROVED, ejecuta el callback externo.
+ *       
+ *       **2. Reintentos de callbacks:** Reintenta todos los callbacks externos que fallaron previamente.
+ *       Máximo 5 intentos por callback.
+ *     tags: [Reconciliation]
+ *     parameters:
+ *       - in: query
+ *         name: days
+ *         schema:
+ *           type: integer
+ *           default: 7
+ *         description: Número de días hacia atrás para revisar pagos (máximo 30)
+ *       - in: query
+ *         name: skipReconciliation
+ *         schema:
+ *           type: boolean
+ *           default: false
+ *         description: Si es true, solo ejecuta reintentos de callbacks
+ *       - in: query
+ *         name: skipCallbacks
+ *         schema:
+ *           type: boolean
+ *           default: false
+ *         description: Si es true, solo ejecuta reconciliación de pagos
+ *     responses:
+ *       200:
+ *         description: Cron ejecutado exitosamente
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success:
+ *                   type: boolean
+ *                 reconciliation:
+ *                   type: object
+ *                   properties:
+ *                     paymentsChecked:
+ *                       type: integer
+ *                     paymentsUpdated:
+ *                       type: integer
+ *                     updates:
+ *                       type: array
+ *                       items:
+ *                         type: object
+ *                 callbacks:
+ *                   type: object
+ *                   properties:
+ *                     callbacksChecked:
+ *                       type: integer
+ *                     callbacksSucceeded:
+ *                       type: integer
+ *                     callbacksFailed:
+ *                       type: integer
+ *                     callbacksMaxRetries:
+ *                       type: integer
+ *       500:
+ *         description: Error en el cron
+ */
+app.get('/api/cron', async (req, res) => {
+    const cronStartTime = Date.now();
+    const results = {
+        success: true,
+        reconciliation: null,
+        callbacks: null
+    };
+
+    try {
+        const daysBack = Math.min(parseInt(req.query.days) || 7, 30);
+        const skipReconciliation = req.query.skipReconciliation === 'true';
+        const skipCallbacks = req.query.skipCallbacks === 'true';
+        
+        console.log(`🔄 [CRON] Starting cron job...`);
+
+        // ========================================
+        // PARTE 1: Reconciliación de pagos
+        // ========================================
+        if (!skipReconciliation) {
+            const cutoffDate = moment().subtract(daysBack, 'days').toDate();
+            
+            console.log(`📊 [CRON] Reconciliation for last ${daysBack} days...`);
+
+            const paymentsToCheck = await Payment.find({
+                status: { $in: ['CREATED', 'PENDING'] },
+                createdAt: { $gte: cutoffDate }
+            }).sort({ createdAt: -1 });
+
+            console.log(`📊 Found ${paymentsToCheck.length} payments to check`);
+
+            const updates = [];
+            let updatedCount = 0;
+
+            for (const payment of paymentsToCheck) {
+                try {
+                    const getnetStatus = await queryPaymentStatus(payment.requestId);
+                    
+                    const newStatus = getnetStatus.status?.status;
+                    const oldStatus = payment.status;
+
+                    if (newStatus && newStatus !== oldStatus) {
+                        payment.status = newStatus;
+                        payment.lastStatusUpdate = new Date();
+                        payment.getnetResponse = getnetStatus;
+                        await payment.save();
+
+                        updatedCount++;
+                        updates.push({
+                            requestId: payment.requestId,
+                            reference: payment.reference,
+                            oldStatus,
+                            newStatus,
+                            updatedAt: new Date()
+                        });
+
+                        console.log(`✅ Updated ${payment.requestId}: ${oldStatus} → ${newStatus}`);
+
+                        // Si el pago cambió a APPROVED, ejecutar callback
+                        if (newStatus === 'APPROVED' && oldStatus !== 'APPROVED') {
+                            await paymentSuccessful(payment.requestId);
+                        }
+                    }
+
+                    await new Promise(resolve => setTimeout(resolve, 200));
+
+                } catch (error) {
+                    console.error(`❌ Error checking ${payment.requestId}:`, error.message);
+                    await logToDB('CRON_ERROR', {
+                        requestId: payment.requestId,
+                        task: 'reconciliation',
+                        error: error.message
+                    });
+                }
+            }
+
+            results.reconciliation = {
+                daysBack,
+                paymentsChecked: paymentsToCheck.length,
+                paymentsUpdated: updatedCount,
+                updates
+            };
+
+            await logToDB('CRON_RECONCILIATION', {
+                ...results.reconciliation,
+                timestamp: new Date()
+            });
+        }
+
+        // ========================================
+        // PARTE 2: Reintentos de callbacks fallidos
+        // ========================================
+        if (!skipCallbacks) {
+            console.log(`🔄 [CRON] Processing failed callbacks...`);
+
+            const now = new Date();
+            
+            // Query: callbacks PENDING cuyo nextRetryAt ya pasó
+            // Ordenados por nextRetryAt (más urgentes primero)
+            // Límite de 100 por ejecución del cron
+            const pendingCallbacks = await RetryCallback.find({
+                status: 'PENDING',
+                nextRetryAt: { $lte: now }
+            })
+            .sort({ nextRetryAt: 1 })
+            .limit(CALLBACK_CONFIG.BATCH_SIZE);
+
+            console.log(`📊 Found ${pendingCallbacks.length} callbacks ready to retry (limit: ${CALLBACK_CONFIG.BATCH_SIZE})`);
+
+            let succeeded = 0;
+            let failed = 0;
+
+            for (const callback of pendingCallbacks) {
+                const result = await retryCallback(callback);
+                
+                if (result.success) {
+                    succeeded++;
+                } else {
+                    failed++;
+                }
+
+                // Pausa entre callbacks para no saturar
+                await new Promise(resolve => setTimeout(resolve, 500));
+            }
+
+            results.callbacks = {
+                callbacksChecked: pendingCallbacks.length,
+                callbacksSucceeded: succeeded,
+                callbacksFailed: failed
+            };
+
+            await logToDB('CRON_CALLBACKS', {
+                ...results.callbacks,
+                timestamp: new Date()
+            });
+        }
+
+        const duration = Date.now() - cronStartTime;
+        
+        console.log(`✅ [CRON] Completed in ${duration}ms`);
+
+        await logToDB('CRON_COMPLETED', {
+            duration,
+            ...results,
+            timestamp: new Date()
+        });
+
+        res.json({
+            ...results,
+            duration: `${duration}ms`
+        });
 
     } catch (error) {
-        console.error('❌ Error in reconciliation:', error.message);
+        console.error('❌ Error in cron:', error.message);
         
-        await logToDB('ERROR', {
-            endpoint: '/api/cron',
+        await logToDB('CRON_ERROR', {
             error: error.message,
-            message: 'Reconciliation failed'
+            message: 'Cron job failed',
+            timestamp: new Date()
         });
 
         res.status(500).json({ 
             success: false,
-            error: 'Reconciliation failed',
+            error: 'Cron job failed',
             message: error.message 
         });
     }

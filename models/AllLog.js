@@ -4,7 +4,30 @@ const logSchema = new mongoose.Schema({
     type: {
         type: String,
         required: true,
-        enum: ['PAYMENT_CREATED', 'NOTIFICATION_RECEIVED', 'STATUS_QUERY', 'ERROR', 'INFO']
+        enum: [
+            // Core operations
+            'PAYMENT_CREATED',
+            'NOTIFICATION_RECEIVED',
+            'STATUS_QUERY',
+            'ERROR',
+            'INFO',
+            // Callback operations
+            'CALLBACK_SUCCESS',
+            'CALLBACK_FAILED',
+            'CALLBACK_PENDING',
+            // Cron operations
+            'CRON_STARTED',
+            'CRON_RECONCILIATION',
+            'CRON_PAYMENT_UPDATED',
+            'CRON_CALLBACKS',
+            'CRON_CALLBACK_SUCCESS',
+            'CRON_CALLBACK_FAILED',
+            'CRON_COMPLETED',
+            'CRON_ERROR',
+            // Health check
+            'HEALTH_CHECK',
+            'HEALTH_CHECK_ERROR'
+        ]
     },
     requestId: String,
     endpoint: String,

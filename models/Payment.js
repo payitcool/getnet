@@ -29,6 +29,14 @@ const paymentSchema = new mongoose.Schema({
         email: String,
         document: String
     },
+    externalURLCallback: {
+        type: String,
+        default: null
+    },
+    callbackExecuted: {
+        type: Boolean,
+        default: false
+    },
     processUrl: String,
     getnetResponse: mongoose.Schema.Types.Mixed,
     lastStatusUpdate: Date,
