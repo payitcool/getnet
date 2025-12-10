@@ -311,21 +311,25 @@ app.post('/api/notification', async (req, res) => {
         }
 
         // Validar signature según el manual de Getnet
-        // SHA-256(requestId + status + date + secretKey)
+        // SHA-1(requestId + status.status + status.date + secretKey)
         if (signature) {
             const statusStr = status?.status || '';
-            const dateStr = req.body.date || new Date().toISOString();
-            const calculatedSignature = CryptoJS.SHA256(
+            const dateStr = status?.date || new Date().toISOString();
+            const calculatedSignature = CryptoJS.SHA1(
                 `${requestId}${statusStr}${dateStr}${SECRET_KEY}`
             ).toString();
             
             if (calculatedSignature !== signature) {
                 console.warn('⚠️  Invalid signature in notification');
+                console.log('   Provided:', signature);
+                console.log('   Calculated:', calculatedSignature);
+                console.log('   String used:', `${requestId}${statusStr}${dateStr}***KEY***`);
                 await logToDB('NOTIFICATION_INVALID_SIGNATURE', {
                     requestId,
                     reference,
                     providedSignature: signature,
                     calculatedSignature,
+                    stringUsed: `${requestId}${statusStr}${dateStr}[SECRET_KEY]`,
                     endpoint: '/api/notification',
                     method: 'POST',
                     request: req.body,
