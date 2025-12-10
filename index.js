@@ -1165,35 +1165,6 @@ app.get('/api/payment-status/:requestId', async (req, res) => {
 // ========================================
 // RETURN URL: User returns from Getnet checkout (Static HTML)
 // ========================================
-/**
- * @swagger
- * /response:
- *   get:
- *     summary: Página de retorno después del pago
- *     description: |
- *       URL a la que regresa el usuario después de completar o cancelar el pago en Getnet.
- *       Sirve una página HTML estática que usa JavaScript para consultar el estado del pago
- *       mediante las APIs existentes.
- *     tags: [Payments]
- *     parameters:
- *       - in: query
- *         name: reference
- *         schema:
- *           type: string
- *         description: Referencia del pedido (enviado en returnUrl)
- *       - in: query
- *         name: requestId
- *         schema:
- *           type: string
- *         description: ID de la transacción de Getnet (alternativo)
- *     responses:
- *       200:
- *         description: Página HTML con el resultado del pago
- *         content:
- *           text/html:
- *             schema:
- *               type: string
- */
 app.get('/response', (req, res) => {
     res.sendFile(path.join(__dirname, 'views/response.html'));
 });
