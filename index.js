@@ -612,11 +612,6 @@ async function queryPaymentStatus(requestId) {
  *                     type: string
  *                     description: Teléfono móvil del comprador
  *                     example: "+56912345678"
- *               expirationMinutes:
- *                 type: integer
- *                 description: Minutos hasta que expire la sesión de pago
- *                 default: 10
- *                 example: 10
  *               returnUrl:
  *                 type: string
  *                 description: URL de retorno personalizada (opcional)
@@ -680,7 +675,7 @@ async function queryPaymentStatus(requestId) {
 app.post('/api/create-payment', async (req, res) => {
     try {
         // Validar campos requeridos
-        const { amount, buyer, description, reference: customReference, currency, expirationMinutes, returnUrl: customReturnUrl, redirect, externalURLCallback } = req.body;
+        const { amount, buyer, description, reference: customReference, currency, returnUrl: customReturnUrl, redirect, externalURLCallback } = req.body;
         
         const missingFields = [];
         if (!amount) missingFields.push('amount');
@@ -700,7 +695,7 @@ app.post('/api/create-payment', async (req, res) => {
         const reference = customReference || 'ORDER-' + Date.now();
         const paymentCurrency = currency || 'CLP';
         const paymentDescription = description || `Pago de ${paymentCurrency} $${amount}`;
-        const expMinutes = expirationMinutes || 10;
+        const expMinutes = 10; // Fijo en 10 minutos - no modificable por el cliente
         const shouldRedirect = redirect !== false; // Por defecto redirige
         
         // Payment request with notificationUrl

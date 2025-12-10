@@ -194,14 +194,55 @@
                 <div class="price">$5.000</div>
             </div>
             
-            <form action="/create-payment" method="POST">
-                <button type="submit">🎟️ Comprar Entrada</button>
-            </form>
+            <button onclick="comprarEntrada()">🎟️ Comprar Entrada</button>
             
             <div class="secure-payment">
                 <span class="secure-icon">🔒</span> Pago seguro procesado por Getnet
             </div>
         </div>
     </div>
+
+    <script>
+        async function comprarEntrada() {
+            try {
+                const button = event.target;
+                button.disabled = true;
+                button.textContent = '⏳ Procesando...';
+
+                const response = await fetch('/api/create-payment', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({
+                        amount: 5000,
+                        buyer: {
+                            name: 'Cliente',
+                            surname: 'Hologram',
+                            email: 'cliente@cubichologram.com',
+                            mobile: '+56912345678'
+                        },
+                        description: 'Entrada Cubic Hologram',
+                        currency: 'CLP',
+                        redirect: false
+                    })
+                });
+
+                const data = await response.json();
+
+                if (data.processUrl) {
+                    // Redirigir a la página de pago de Getnet
+                    window.location.href = data.processUrl;
+                } else {
+                    throw new Error('No se recibió URL de redirección');
+                }
+            } catch (error) {
+                console.error('Error:', error);
+                alert('Error al procesar el pago. Por favor intenta nuevamente.');
+                button.disabled = false;
+                button.textContent = '🎟️ Comprar Entrada';
+            }
+        }
+    </script>
 </body>
 </html>
