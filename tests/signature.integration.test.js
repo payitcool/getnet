@@ -4,28 +4,68 @@ describe('Getnet Signature Integration Tests', () => {
     const TEST_SECRET_KEY = 'SnZP3D63n3I9dH9O'; // From README
 
     describe('Real-world scenarios', () => {
-        test('should validate real Getnet notification with hardcoded signature', () => {
-            // Real notification data from Getnet
-            const requestId = 161340;
-            const status = {
-                status: 'APPROVED',
-                message: 'Testing notification',
-                reason: 'TT',
-                date: '2025-12-09T14:32:41-05:00'
-            };
-            const realSignature = 'ab5886e4cc24d156f457cd83d70f343a420e3991';
+        test('should validate real Getnet notification with hardcoded signature in TEST environment', () => {
+            // Simulate TEST environment
+            const originalEnv = process.env.ENV;
+            process.env.ENV = 'TEST';
 
-            const result = validateGetnetSignature({
-                requestId,
-                status,
-                signature: realSignature,
-                secretKey: TEST_SECRET_KEY
-            });
+            try {
+                // Real notification data from Getnet
+                const requestId = 161340;
+                const status = {
+                    status: 'APPROVED',
+                    message: 'Testing notification',
+                    reason: 'TT',
+                    date: '2025-12-09T14:32:41-05:00'
+                };
+                const realSignature = 'ab5886e4cc24d156f457cd83d70f343a420e3991';
 
-            // This should validate successfully with the real signature
-            expect(result.isValid).toBe(true);
-            expect(result.calculatedSignature).toBe(realSignature);
-            expect(result.calculatedSignature.length).toBe(40); // SHA-1
+                const result = validateGetnetSignature({
+                    requestId,
+                    status,
+                    signature: realSignature,
+                    secretKey: TEST_SECRET_KEY
+                });
+
+                // Should work in TEST environment
+                expect(result.isValid).toBe(true);
+                expect(result.calculatedSignature).toBe(realSignature);
+                expect(result.calculatedSignature.length).toBe(40); // SHA-1
+            } finally {
+                // Restore original environment
+                process.env.ENV = originalEnv;
+            }
+        });
+
+        test('should reject hardcoded signature in PRODUCTION environment', () => {
+            // Simulate PRODUCTION environment
+            const originalEnv = process.env.ENV;
+            process.env.ENV = 'PRODUCTION';
+
+            try {
+                // Same notification data
+                const requestId = 161340;
+                const status = {
+                    status: 'APPROVED',
+                    message: 'Testing notification',
+                    reason: 'TT',
+                    date: '2025-12-09T14:32:41-05:00'
+                };
+                const realSignature = 'ab5886e4cc24d156f457cd83d70f343a420e3991';
+
+                const result = validateGetnetSignature({
+                    requestId,
+                    status,
+                    signature: realSignature,
+                    secretKey: TEST_SECRET_KEY
+                });
+
+                // Hardcoded signature should FAIL in PRODUCTION
+                expect(result.isValid).toBe(false);
+            } finally {
+                // Restore original environment
+                process.env.ENV = originalEnv;
+            }
         });
 
         test('should prevent SHA-256 regression - ensure SHA-1 is always used', () => {

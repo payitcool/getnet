@@ -28,7 +28,18 @@ function validateGetnetSignature({ requestId, status, signature, secretKey, fall
         `${requestId}${statusStr}${dateStr}${secretKey}`
     ).toString();
 
-    const isValid = calculatedSignature === signature;
+    let isValid = calculatedSignature === signature;
+    
+    // In PRODUCTION, reject hardcoded signatures
+    if (process.env.ENV === 'PRODUCTION') {
+        const hardcodedSignatures = [
+            'ab5886e4cc24d156f457cd83d70f343a420e3991' // Known test signature
+        ];
+        
+        if (hardcodedSignatures.includes(signature)) {
+            isValid = false;
+        }
+    }
     
     return {
         isValid,
