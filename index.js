@@ -715,7 +715,7 @@ app.post('/api/create-payment', async (req, res) => {
                 }
             },
             expiration: moment().add(expMinutes, 'minutes').toISOString(),
-            returnUrl: customReturnUrl || `${DOMAIN}/response?reference=${reference}`,
+            returnUrl: returnUrl,
             notificationUrl: `${DOMAIN}/api/notification`,
             ipAddress: req.ip || '127.0.0.1',
             userAgent: req.headers['user-agent'] || 'Unknown'
@@ -767,19 +767,16 @@ app.post('/api/create-payment', async (req, res) => {
             console.log('✅ Payment saved to DB:', payment._id);
 
             if (responseData.processUrl) {
-                // Si redirect=false, devolver JSON en lugar de redirigir
-                if (!shouldRedirect) {
-                    return res.json({
-                        success: true,
-                        requestId: responseData.requestId,
-                        reference: reference,
-                        processUrl: responseData.processUrl,
-                        amount: amount,
-                        currency: paymentCurrency,
-                        expiresAt: paymentData.expiration
-                    });
-                }
-                res.redirect(responseData.processUrl);
+                // Siempre devolver JSON con la información del pago
+                return res.json({
+                    success: true,
+                    requestId: responseData.requestId,
+                    reference: reference,
+                    processUrl: responseData.processUrl,
+                    amount: amount,
+                    currency: paymentCurrency,
+                    expiresAt: paymentData.expiration
+                });
             } else {
                 res.status(500).json({ error: 'No processUrl in response', data: response.data });
             }

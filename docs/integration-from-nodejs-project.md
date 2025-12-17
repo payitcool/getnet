@@ -29,11 +29,11 @@ const response = await fetch('https://payments.sitholding.com/api/create-payment
         description: 'Suscripción mensual',
         reference: 'ORDER-' + Date.now(),
         buyer: {
-            name: 'Juan',
-            email: 'juan@ejemplo.com'
+            email: 'juan@ejemplo.com',
+            name: 'Juan'  // Opcional
         },
-        externalURLCallback: 'https://tu-app.com/api/webhook/pago',
-        redirect: false  // Para recibir JSON en vez de redirección
+        returnUrl: 'https://tu-app.com/resultado-pago',
+        externalURLCallback: 'https://tu-app.com/api/webhook/pago'
     })
 });
 
@@ -52,14 +52,13 @@ console.log(data);
 | Campo | Tipo | Requerido | Descripción |
 |-------|------|-----------|-------------|
 | `amount` | number | ✅ | Monto en pesos (sin decimales) |
+| `buyer.email` | string | ✅ | Email del cliente (obligatorio) |
+| `returnUrl` | string | ✅ | URL donde será redirigido el usuario después del pago |
 | `currency` | string | ❌ | Moneda (default: CLP) |
 | `description` | string | ❌ | Descripción del cobro |
 | `reference` | string | ❌ | Tu referencia interna (auto-generada si no se envía) |
-| `buyer.name` | string | ✅ | Nombre del cliente |
-| `buyer.email` | string | ✅ | Email del cliente |
+| `buyer.name` | string | ❌ | Nombre del cliente (default: "Cliente") |
 | `externalURLCallback` | string | ❌ | URL donde recibirás la notificación de pago exitoso |
-| `redirect` | boolean | ❌ | `false` para recibir JSON, `true` para redirigir al checkout |
-| `expirationMinutes` | number | ❌ | Minutos hasta expirar (default: 10) |
 
 ---
 
@@ -231,11 +230,11 @@ async function crearPago() {
             body: JSON.stringify({
                 amount: 5000,
                 buyer: {
-                    name: 'Test User',
-                    email: 'test@example.com'
+                    email: 'test@example.com',
+                    name: 'Test User'
                 },
-                externalURLCallback: 'https://tu-app.com/webhook',
-                redirect: false
+                returnUrl: 'https://tu-app.com/resultado',
+                externalURLCallback: 'https://tu-app.com/webhook'
             })
         });
         

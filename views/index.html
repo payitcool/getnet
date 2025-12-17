@@ -217,14 +217,12 @@
                     body: JSON.stringify({
                         amount: 5000,
                         buyer: {
-                            name: 'Cliente',
-                            surname: 'Hologram',
                             email: 'cliente@cubichologram.com',
-                            mobile: '+56912345678'
+                            name: 'Cliente Hologram'
                         },
                         description: 'Entrada Cubic Hologram',
                         currency: 'CLP',
-                        redirect: false
+                        returnUrl: window.location.origin + '/response'
                     })
                 });
 
