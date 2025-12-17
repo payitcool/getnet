@@ -56,7 +56,7 @@ console.log(data);
 | `returnUrl` | string | ✅ | URL donde será redirigido el usuario después del pago |
 | `currency` | string | ❌ | Moneda (default: CLP) |
 | `description` | string | ❌ | Descripción del cobro |
-| `reference` | string | ❌ | Tu referencia interna (auto-generada si no se envía) |
+| `reference` | string | ❌ | Tu referencia interna (1-32 caracteres, auto-generada si no se envía) |
 | `buyer.name` | string | ❌ | Nombre del cliente (default: "Cliente") |
 | `externalURLCallback` | string | ❌ | URL donde recibirás la notificación de pago exitoso |
 

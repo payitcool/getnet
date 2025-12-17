@@ -685,7 +685,17 @@ app.post('/api/create-payment', async (req, res) => {
         }
 
         const auth = getnetAuth();
-        const reference = customReference || 'ORDER-' + Date.now();
+        let reference = customReference || 'ORDER-' + Date.now();
+        
+        // Validar que reference tenga máximo 32 caracteres (requisito de Getnet)
+        if (reference.length > 32) {
+            return res.status(400).json({
+                error: 'Invalid reference',
+                message: 'Reference must be between 1 and 32 characters',
+                provided: reference.length
+            });
+        }
+        
         const paymentCurrency = currency || 'CLP';
         const paymentDescription = description || `Pago de ${paymentCurrency} $${amount}`;
         const expMinutes = 10; // Fijo en 10 minutos - no modificable por el cliente
