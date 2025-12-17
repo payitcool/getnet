@@ -12,6 +12,10 @@ const Payment = require('./models/Payment');
 const AllLog = require('./models/AllLog');
 const RetryCallback = require('./models/RetryCallback');
 const { validateGetnetSignature } = require('./utils/signature');
+const { generateAuth } = require('./utils/auth');
+const { logToDB } = require('./utils/logger');
+const { CALLBACK_CONFIG } = require('./utils/callback');
+const { executeExternalCallback, retryCallback, notifyPaymentStatusChange } = require('./services/paymentCallback');
 
 const app = express();
 const port = process.env.PORT || 3000;
@@ -59,340 +63,15 @@ console.log(`🚀 Running in ${ENV} mode against ${GETNET_URL}`);
 console.log(`🌐 Domain: ${DOMAIN}`);
 console.log(`📚 API Docs: ${DOMAIN}/docs`);
 
-// ========================================
-// CONFIGURACIÓN DE CALLBACKS
-// ========================================
-const CALLBACK_CONFIG = {
-    TIMEOUT_MS: 10000,              // Timeout de 10 segundos
-    VALID_STATUS_CODES: [200, 201], // Códigos HTTP válidos
-    RETRY_BASE_MINUTES: 1,          // Base para backoff: intento N → espera N+1 minutos
-    BATCH_SIZE: 100                 // Máximo callbacks a procesar por ejecución del cron
-};
+// Callback configuration imported from utils/callback.js
 
-// ========================================
-// FUNCIÓN CENTRALIZADA: Enviar callback externo
-// ========================================
-/**
- * Función única para enviar callbacks externos.
- * Incluye SERVER_2_SERVER_SECRET, valida 200/201, y maneja errores.
- * 
- * @param {Object} options - Opciones del callback
- * @param {string} options.callbackUrl - URL del callback
- * @param {string} options.requestId - ID de la transacción
- * @param {string} options.reference - Referencia del pago
- * @param {string} options.status - Estado del pago (APPROVED, etc.)
- * @param {number} options.amount - Monto del pago
- * @param {string} options.currency - Moneda
- * @param {Object} options.buyer - Datos del comprador
- * @param {boolean} options.isRetry - Si es un reintento
- * @param {number} options.attemptNumber - Número de intento
- * @returns {Promise<{success: boolean, statusCode: number, error?: string}>}
- */
-async function sendCallback(options) {
-    const {
-        callbackUrl,
-        requestId,
-        reference,
-        status,
-        amount,
-        currency,
-        buyer,
-        isRetry = false,
-        attemptNumber = 1
-    } = options;
+// Callback functions imported from services/paymentCallback.js
 
-    // Generar secret único por URL: sha1(SERVER_2_SERVER_SECRET + callbackUrl)
-    const secretBase = process.env.SERVER_2_SERVER_SECRET || '';
-    const secretHash = require('crypto')
-        .createHash('sha1')
-        .update(secretBase + callbackUrl)
-        .digest('hex');
 
-    const payload = {
-        secretHash,  // sha1(SERVER_2_SERVER_SECRET + callbackUrl)
-        requestId,
-        reference,
-        status,
-        amount,
-        currency,
-        buyer,
-        timestamp: new Date().toISOString(),
-        isRetry,
-        attemptNumber
-    };
 
-    const headers = {
-        'Content-Type': 'application/json',
-        'X-Getnet-RequestId': requestId,
-        'X-Attempt-Number': String(attemptNumber)
-    };
 
-    try {
-        const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), CALLBACK_CONFIG.TIMEOUT_MS);
 
-        const response = await fetch(callbackUrl, {
-            method: 'POST',
-            headers,
-            body: JSON.stringify(payload),
-            signal: controller.signal
-        });
 
-        clearTimeout(timeoutId);
-
-        if (CALLBACK_CONFIG.VALID_STATUS_CODES.includes(response.status)) {
-            return {
-                success: true,
-                statusCode: response.status
-            };
-        } else {
-            const data = await response.json().catch(() => ({}));
-            return {
-                success: false,
-                statusCode: response.status,
-                error: data.message || data.error || `HTTP ${response.status}`
-            };
-        }
-
-    } catch (error) {
-        return {
-            success: false,
-            statusCode: 0,
-            error: error.name === 'AbortError' ? 'Timeout' : error.message
-        };
-    }
-}
-
-// ========================================
-// FUNCIÓN: Ejecutar callback y manejar resultado
-// ========================================
-/**
- * Ejecuta el callback externo para un pago.
- * Si falla, crea/actualiza registro en RetryCallback.
- * Si éxito, marca el pago como callbackExecuted.
- * 
- * @param {Object} payment - Documento de Payment de MongoDB
- * @returns {Promise<boolean>} - true si fue exitoso
- */
-async function executeExternalCallback(payment) {
-    const callbackUrl = payment.externalURLCallback;
-    const requestId = payment.requestId;
-
-    console.log(`📤 Executing external callback for ${requestId}: ${callbackUrl}`);
-
-    const result = await sendCallback({
-        callbackUrl,
-        requestId,
-        reference: payment.reference,
-        status: payment.status,
-        amount: payment.amount,
-        currency: payment.currency,
-        buyer: payment.buyer,
-        isRetry: false,
-        attemptNumber: 1
-    });
-
-    if (result.success) {
-        console.log(`✅ Callback successful for ${requestId}: Status ${result.statusCode} (${payment.status})`);
-
-        await logToDB('CALLBACK_SUCCESS', {
-            requestId,
-            callbackUrl,
-            status: payment.status,
-            statusCode: result.statusCode,
-            timestamp: new Date()
-        });
-
-        return true;
-
-    } else {
-        console.error(`❌ Callback failed for ${requestId}: ${result.error} (Status: ${result.statusCode})`);
-
-        // Calcular próximo reintento: intento 1 → espera 2 minutos, intento 9 → espera 10 minutos
-        const nextAttempt = 1; // Primer reintento
-        const minutesToWait = (nextAttempt + 1) * CALLBACK_CONFIG.RETRY_BASE_MINUTES;
-        const nextRetryAt = new Date(Date.now() + minutesToWait * 60 * 1000);
-
-        // Guardar en RetryCallback para reintentos (infinitos)
-        await RetryCallback.findOneAndUpdate(
-            { requestId },
-            {
-                $set: {
-                    reference: payment.reference,
-                    callbackUrl,
-                    status: 'PENDING',
-                    lastAttempt: new Date(),
-                    lastError: result.error,
-                    lastStatusCode: result.statusCode,
-                    nextRetryAt,
-                    paymentData: {
-                        amount: payment.amount,
-                        currency: payment.currency,
-                        paymentStatus: payment.status,
-                        buyer: payment.buyer
-                    }
-                },
-                $inc: { attempts: 1 }
-            },
-            { upsert: true, new: true }
-        );
-
-        await logToDB('CALLBACK_FAILED', {
-            requestId,
-            callbackUrl,
-            statusCode: result.statusCode,
-            error: result.error,
-            message: 'Callback failed, queued for retry',
-            timestamp: new Date()
-        });
-
-        return false;
-    }
-}
-
-/**
- * Reintenta un callback desde RetryCallback.
- * Reintentos infinitos con backoff: intento N → espera N+1 minutos para el próximo.
- * 
- * @param {Object} retryCallback - Documento de RetryCallback de MongoDB
- * @returns {Promise<{success: boolean}>}
- */
-async function retryCallback(retryCallback) {
-    const attemptNumber = retryCallback.attempts + 1;
-    
-    console.log(`🔄 Retrying callback for ${retryCallback.requestId} (attempt ${attemptNumber})`);
-
-    const result = await sendCallback({
-        callbackUrl: retryCallback.callbackUrl,
-        requestId: retryCallback.requestId,
-        reference: retryCallback.reference,
-        status: retryCallback.paymentData.paymentStatus,
-        amount: retryCallback.paymentData.amount,
-        currency: retryCallback.paymentData.currency,
-        buyer: retryCallback.paymentData.buyer,
-        isRetry: true,
-        attemptNumber
-    });
-
-    retryCallback.attempts = attemptNumber;
-    retryCallback.lastAttempt = new Date();
-    retryCallback.lastStatusCode = result.statusCode;
-
-    if (result.success) {
-        retryCallback.status = 'SUCCESS';
-        retryCallback.successAt = new Date();
-        retryCallback.lastError = null;
-        retryCallback.nextRetryAt = null; // Ya no necesita reintentos
-        await retryCallback.save();
-
-        // Marcar el pago como callback ejecutado
-        await Payment.updateOne(
-            { requestId: retryCallback.requestId },
-            { $set: { callbackExecuted: true } }
-        );
-
-        console.log(`✅ Callback succeeded for ${retryCallback.requestId} after ${attemptNumber} attempts`);
-
-        await logToDB('CRON_CALLBACK_SUCCESS', {
-            requestId: retryCallback.requestId,
-            callbackUrl: retryCallback.callbackUrl,
-            attempt: attemptNumber,
-            statusCode: result.statusCode
-        });
-
-        return { success: true };
-
-    } else {
-        retryCallback.lastError = result.error;
-
-        // Calcular próximo reintento con backoff: intento N → espera N+1 minutos
-        const minutesToWait = (attemptNumber + 1) * CALLBACK_CONFIG.RETRY_BASE_MINUTES;
-        retryCallback.nextRetryAt = new Date(Date.now() + minutesToWait * 60 * 1000);
-
-        console.log(`❌ Callback failed for ${retryCallback.requestId}: ${result.error}`);
-        console.log(`   ⏰ Next retry in ${minutesToWait} minutes (attempt ${attemptNumber + 1})`);
-
-        await retryCallback.save();
-
-        await logToDB('CRON_CALLBACK_FAILED', {
-            requestId: retryCallback.requestId,
-            callbackUrl: retryCallback.callbackUrl,
-            attempt: attemptNumber,
-            statusCode: result.statusCode,
-            error: result.error,
-            nextRetryAt: retryCallback.nextRetryAt,
-            minutesToNextRetry: minutesToWait
-        });
-
-        return { success: false };
-    }
-}
-
-// ========================================
-// FUNCIÓN PRINCIPAL: Notificar cambios de estado del pago
-// ========================================
-/**
- * Esta función se ejecuta cuando el estado de un pago cambia.
- * Se notifica en TODOS los cambios de estado: CREATED, PENDING, APPROVED, REJECTED, FAILED, EXPIRED, etc.
- * Esto permite al cliente tener seguimiento completo del ciclo de vida del pago.
- * 
- * @param {string} transactionId - El requestId de Getnet
- * @param {string} oldStatus - El estado anterior del pago
- * @param {string} newStatus - El nuevo estado del pago
- */
-async function notifyPaymentStatusChange(transactionId, oldStatus, newStatus) {
-    console.log(`🔔 [STATUS CHANGED] Transaction ${transactionId}: ${oldStatus} → ${newStatus}`);
-    
-    try {
-        // Buscar el pago en la base de datos
-        const payment = await Payment.findOne({ requestId: transactionId });
-        
-        if (!payment) {
-            console.error(`❌ Payment not found for transactionId: ${transactionId}`);
-            return;
-        }
-
-        // Si tiene externalURLCallback, ejecutarlo para notificar el cambio de estado
-        if (payment.externalURLCallback) {
-            await executeExternalCallback(payment);
-        } else {
-            console.log(`ℹ️  No external callback configured for ${transactionId}`);
-        }
-
-        await logToDB('INFO', {
-            message: `Payment status changed: ${oldStatus} → ${newStatus}`,
-            requestId: transactionId,
-            oldStatus,
-            newStatus,
-            hasCallback: !!payment.externalURLCallback,
-            timestamp: new Date()
-        });
-
-    } catch (error) {
-        console.error(`❌ Error in notifyPaymentStatusChange: ${error.message}`);
-        await logToDB('ERROR', {
-            message: 'Error in notifyPaymentStatusChange',
-            requestId: transactionId,
-            oldStatus,
-            newStatus,
-            error: error.message,
-            timestamp: new Date()
-        });
-    }
-}
-
-// Helper function to log to database
-async function logToDB(type, data) {
-    try {
-        await AllLog.create({
-            type,
-            ...data,
-            timestamp: new Date()
-        });
-    } catch (error) {
-        console.error('Error logging to DB:', error.message);
-    }
-}
 
 app.get('/', (req, res) => {
     res.sendFile(path.join(__dirname, 'views/index.html'));
@@ -494,24 +173,9 @@ app.get('/healthz', async (req, res) => {
     }
 });
 
+// Authentication function imported from utils/auth.js
 function getnetAuth() {
-    // Generate a random string for nonce
-    const nonceString = Math.random().toString(36).substring(2, 15) + Math.random().toString(36).substring(2, 15);
-    const seed = moment().toISOString();
-    
-    // tranKey = Base64(SHA-256(Nonce + Seed + SecretKey))
-    const rawTranKey = nonceString + seed + SECRET_KEY;
-    const tranKey = CryptoJS.SHA256(rawTranKey).toString(CryptoJS.enc.Base64);
-
-    // The nonce sent in the request must be Base64 encoded
-    const nonceBase64 = Buffer.from(nonceString).toString('base64');
-
-    return {
-        login: LOGIN,
-        tranKey: tranKey,
-        nonce: nonceBase64,
-        seed: seed
-    };
+    return generateAuth(LOGIN, SECRET_KEY);
 }
 
 // Query Getnet API for payment status
@@ -992,7 +656,7 @@ app.post('/api/notification', async (req, res) => {
 
         // Notificar cambio de estado si hubo cambio
         if (payment.status !== oldStatus) {
-            await notifyPaymentStatusChange(requestId, oldStatus, payment.status);
+            await notifyPaymentStatusChange(requestId, oldStatus, payment.status, process.env.SERVER_2_SERVER_SECRET || '');
         }
 
         // Respond with 200 OK to acknowledge receipt
@@ -1221,7 +885,7 @@ app.get('/api/payment-by-reference/:reference', async (req, res) => {
 
                 // Notificar cambio de estado si hubo cambio
                 if (newStatus !== oldStatus) {
-                    await notifyPaymentStatusChange(payment.requestId, oldStatus, newStatus);
+                    await notifyPaymentStatusChange(payment.requestId, oldStatus, newStatus, process.env.SERVER_2_SERVER_SECRET || '');
                 }
             }
         } catch (error) {
@@ -1376,7 +1040,7 @@ app.get('/api/cron', async (req, res) => {
                         console.log(`✅ Updated ${payment.requestId}: ${oldStatus} → ${newStatus}`);
 
                         // Notificar el cambio de estado
-                        await notifyPaymentStatusChange(payment.requestId, oldStatus, newStatus);
+                        await notifyPaymentStatusChange(payment.requestId, oldStatus, newStatus, process.env.SERVER_2_SERVER_SECRET || '');
                     }
 
                     await new Promise(resolve => setTimeout(resolve, 200));
@@ -1428,7 +1092,7 @@ app.get('/api/cron', async (req, res) => {
             let failed = 0;
 
             for (const callback of pendingCallbacks) {
-                const result = await retryCallback(callback);
+                const result = await retryCallback(callback, process.env.SERVER_2_SERVER_SECRET || '');
                 
                 if (result.success) {
                     succeeded++;

@@ -269,15 +269,42 @@ Las pruebas garantizan que:
 - Nunca se vuelva accidentalmente a SHA-256 (64 caracteres)
 - La validación funciona con datos reales de Getnet
 
+## � Estructura del Proyecto
+
+```
+getnet-api/
+├── config/           # Configuración de DB y Swagger
+│   ├── database.js
+│   └── swagger.js
+├── models/           # Modelos de MongoDB
+│   ├── Payment.js
+│   ├── AllLog.js
+│   └── RetryCallback.js
+├── utils/            # Utilidades reutilizables
+│   ├── auth.js       # Autenticación PlaceToPay
+│   ├── callback.js   # Lógica de callbacks HTTP
+│   ├── logger.js     # Logging a base de datos
+│   └── signature.js  # Validación de firmas SHA-1
+├── services/         # Lógica de negocio
+│   └── paymentCallback.js  # Manejo de callbacks de pago
+├── tests/            # Pruebas unitarias (Jest)
+│   ├── auth.test.js
+│   ├── callback.test.js
+│   ├── signature.test.js
+│   └── signature.integration.test.js
+├── views/            # Vistas HTML
+├── index.js          # Servidor principal
+└── package.json
+```
+
 ## 🛠️ Tecnologías
 
-- Express.js
-- MongoDB + Mongoose
-- Axios
-- CryptoJS
-- Moment.js
-- dotenv
-- Jest (testing)
+- **Backend**: Express.js + Node.js
+- **Base de Datos**: MongoDB + Mongoose
+- **Testing**: Jest (100% cobertura en utils/)
+- **Seguridad**: CryptoJS (SHA-1, SHA-256)
+- **Documentación**: Swagger UI
+- **Utilidades**: Moment.js, dotenv
 
 ---
 
