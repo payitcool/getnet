@@ -677,12 +677,10 @@ app.post('/api/create-payment', async (req, res) => {
         // Validar campos requeridos
         const { amount, buyer, description, reference: customReference, currency, returnUrl: customReturnUrl, redirect, externalURLCallback } = req.body;
         
+        // Validación mínima: solo amount y buyer.email son obligatorios
         const missingFields = [];
         if (!amount) missingFields.push('amount');
-        if (!buyer) missingFields.push('buyer');
-        if (buyer && !buyer.name) missingFields.push('buyer.name');
-        if (buyer && !buyer.email) missingFields.push('buyer.email');
-        // document es opcional - Getnet lo acepta vacío
+        if (!buyer || !buyer.email) missingFields.push('buyer.email');
         
         if (missingFields.length > 0) {
             return res.status(400).json({
@@ -703,7 +701,7 @@ app.post('/api/create-payment', async (req, res) => {
             auth: auth,
             locale: 'es_CL',
             buyer: {
-                name: buyer.name,
+                name: buyer.name || 'Cliente',
                 surname: buyer.surname || '',
                 email: buyer.email,
                 mobile: buyer.mobile || ''
