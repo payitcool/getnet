@@ -8,6 +8,7 @@ const logSchema = new mongoose.Schema({
             // Core operations
             'PAYMENT_CREATED',
             'NOTIFICATION_RECEIVED',
+            'NOTIFICATION_INVALID_SIGNATURE',
             'STATUS_QUERY',
             'ERROR',
             'INFO',

@@ -11,6 +11,7 @@ const connectDB = require('./config/database');
 const Payment = require('./models/Payment');
 const AllLog = require('./models/AllLog');
 const RetryCallback = require('./models/RetryCallback');
+const { validateGetnetSignature } = require('./utils/signature');
 
 const app = express();
 const port = process.env.PORT || 3000;
@@ -913,25 +914,27 @@ app.post('/api/notification', async (req, res) => {
         }
 
         // Validar signature según el manual de Getnet
-        // SHA-256(requestId + status + date + secretKey)
         if (signature) {
-            const statusStr = status?.status || '';
-            const dateStr = req.body.date || new Date().toISOString();
-            const calculatedSignature = CryptoJS.SHA256(
-                `${requestId}${statusStr}${dateStr}${SECRET_KEY}`
-            ).toString();
+            const validationResult = validateGetnetSignature({
+                requestId,
+                status,
+                signature,
+                secretKey: SECRET_KEY,
+                fallbackDate: req.body.date
+            });
             
-            if (calculatedSignature !== signature) {
+            if (!validationResult.isValid) {
                 console.warn('⚠️  Invalid signature in notification');
-                console.log('   Provided:', signature);
-                console.log('   Calculated:', calculatedSignature);
-                console.log('   String used:', `${requestId}${statusStr}${dateStr}***KEY***`);
+                console.log('   Provided:', validationResult.providedSignature);
+                console.log('   Calculated:', validationResult.calculatedSignature);
+                console.log('   String used:', validationResult.stringUsed);
                 await logToDB('NOTIFICATION_INVALID_SIGNATURE', {
                     requestId,
                     reference,
-                    providedSignature: signature,
-                    calculatedSignature,
-                    stringUsed: `${requestId}${statusStr}${dateStr}[SECRET_KEY]`,
+                    providedSignature: validationResult.providedSignature,
+                    calculatedSignature: validationResult.calculatedSignature,
+                    stringUsed: validationResult.stringUsed,
+                    error: validationResult.error,
                     endpoint: '/api/notification',
                     method: 'POST',
                     request: req.body,

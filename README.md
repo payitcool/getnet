@@ -241,6 +241,34 @@ Ver `EJEMPLOS_PAYMENT_SUCCESSFUL.js` para más ejemplos.
 - ✅ **Tienes webhook** → `/api/notification` recibe notificaciones automáticas
 - ✅ **No marcas como pagado algo rechazado** → Verificación real con Getnet API
 
+## 🧪 Testing
+
+Este proyecto incluye pruebas unitarias completas para prevenir regresiones:
+
+```bash
+# Ejecutar todas las pruebas
+npm test
+
+# Ejecutar con cobertura
+npm run test:coverage
+
+# Ejecutar en modo watch
+npm run test:watch
+```
+
+### Suite de Pruebas
+
+- ✅ **Validación de firma SHA-1** (no SHA-256)
+- ✅ **Casos reales de notificaciones**
+- ✅ **Prevención de regresión de algoritmo**
+- ✅ **Múltiples estados (APPROVED, REJECTED, PENDING)**
+- ✅ **100% de cobertura en utils/signature.js**
+
+Las pruebas garantizan que:
+- El algoritmo de firma siempre usa **SHA-1** (40 caracteres)
+- Nunca se vuelva accidentalmente a SHA-256 (64 caracteres)
+- La validación funciona con datos reales de Getnet
+
 ## 🛠️ Tecnologías
 
 - Express.js
@@ -249,6 +277,7 @@ Ver `EJEMPLOS_PAYMENT_SUCCESSFUL.js` para más ejemplos.
 - CryptoJS
 - Moment.js
 - dotenv
+- Jest (testing)
 
 ---
 
