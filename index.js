@@ -192,15 +192,12 @@ async function executeExternalCallback(payment) {
     });
 
     if (result.success) {
-        console.log(`✅ Callback successful for ${requestId}: Status ${result.statusCode}`);
-
-        // Marcar como ejecutado exitosamente
-        payment.callbackExecuted = true;
-        await payment.save();
+        console.log(`✅ Callback successful for ${requestId}: Status ${result.statusCode} (${payment.status})`);
 
         await logToDB('CALLBACK_SUCCESS', {
             requestId,
             callbackUrl,
+            status: payment.status,
             statusCode: result.statusCode,
             timestamp: new Date()
         });
@@ -331,17 +328,19 @@ async function retryCallback(retryCallback) {
 }
 
 // ========================================
-// FUNCIÓN PRINCIPAL: Ejecutar lógica cuando el pago es exitoso
+// FUNCIÓN PRINCIPAL: Notificar cambios de estado del pago
 // ========================================
 /**
- * Esta función se ejecuta UNA VEZ cuando un pago es confirmado como APPROVED.
- * Si el pago tiene un externalURLCallback configurado, lo ejecuta.
- * Si falla, guarda en RetryCallback para reintentos.
+ * Esta función se ejecuta cuando el estado de un pago cambia.
+ * Se notifica en TODOS los cambios de estado: CREATED, PENDING, APPROVED, REJECTED, FAILED, EXPIRED, etc.
+ * Esto permite al cliente tener seguimiento completo del ciclo de vida del pago.
  * 
- * @param {string} transactionId - El requestId de Getnet (obtenido en la creación del pago)
+ * @param {string} transactionId - El requestId de Getnet
+ * @param {string} oldStatus - El estado anterior del pago
+ * @param {string} newStatus - El nuevo estado del pago
  */
-async function paymentSuccessful(transactionId) {
-    console.log(`✅ [PAYMENT SUCCESSFUL] Transaction ID: ${transactionId}`);
+async function notifyPaymentStatusChange(transactionId, oldStatus, newStatus) {
+    console.log(`🔔 [STATUS CHANGED] Transaction ${transactionId}: ${oldStatus} → ${newStatus}`);
     
     try {
         // Buscar el pago en la base de datos
@@ -352,34 +351,29 @@ async function paymentSuccessful(transactionId) {
             return;
         }
 
-        // Si ya se ejecutó el callback, no hacer nada
-        if (payment.callbackExecuted) {
-            console.log(`ℹ️  Callback already executed for ${transactionId}`);
-            return;
-        }
-
-        // Si tiene externalURLCallback, ejecutarlo
+        // Si tiene externalURLCallback, ejecutarlo para notificar el cambio de estado
         if (payment.externalURLCallback) {
             await executeExternalCallback(payment);
         } else {
-            // Marcar como ejecutado (no tiene callback)
-            payment.callbackExecuted = true;
-            await payment.save();
             console.log(`ℹ️  No external callback configured for ${transactionId}`);
         }
 
         await logToDB('INFO', {
-            message: 'Payment successful - Business logic executed',
+            message: `Payment status changed: ${oldStatus} → ${newStatus}`,
             requestId: transactionId,
+            oldStatus,
+            newStatus,
             hasCallback: !!payment.externalURLCallback,
             timestamp: new Date()
         });
 
     } catch (error) {
-        console.error(`❌ Error in paymentSuccessful: ${error.message}`);
+        console.error(`❌ Error in notifyPaymentStatusChange: ${error.message}`);
         await logToDB('ERROR', {
-            message: 'Error in paymentSuccessful',
+            message: 'Error in notifyPaymentStatusChange',
             requestId: transactionId,
+            oldStatus,
+            newStatus,
             error: error.message,
             timestamp: new Date()
         });
@@ -1000,9 +994,9 @@ app.post('/api/notification', async (req, res) => {
 
         console.log(`✅ Notification processed for ${requestId}. Status: ${payment.status}`);
 
-        // Si el pago cambió a APPROVED, ejecutar lógica de negocio
-        if (payment.status === 'APPROVED' && oldStatus !== 'APPROVED') {
-            await paymentSuccessful(requestId);
+        // Notificar cambio de estado si hubo cambio
+        if (payment.status !== oldStatus) {
+            await notifyPaymentStatusChange(requestId, oldStatus, payment.status);
         }
 
         // Respond with 200 OK to acknowledge receipt
@@ -1223,14 +1217,15 @@ app.get('/api/payment-by-reference/:reference', async (req, res) => {
             
             if (getnetStatus.status && getnetStatus.status.status) {
                 const oldStatus = payment.status;
-                payment.status = getnetStatus.status.status;
+                const newStatus = getnetStatus.status.status;
+                payment.status = newStatus;
                 payment.lastStatusUpdate = new Date();
                 payment.getnetResponse = getnetStatus;
                 await payment.save();
 
-                // Si el pago cambió a APPROVED, ejecutar callback
-                if (payment.status === 'APPROVED' && oldStatus !== 'APPROVED') {
-                    await paymentSuccessful(payment.requestId);
+                // Notificar cambio de estado si hubo cambio
+                if (newStatus !== oldStatus) {
+                    await notifyPaymentStatusChange(payment.requestId, oldStatus, newStatus);
                 }
             }
         } catch (error) {
@@ -1384,10 +1379,8 @@ app.get('/api/cron', async (req, res) => {
 
                         console.log(`✅ Updated ${payment.requestId}: ${oldStatus} → ${newStatus}`);
 
-                        // Si el pago cambió a APPROVED, ejecutar callback
-                        if (newStatus === 'APPROVED' && oldStatus !== 'APPROVED') {
-                            await paymentSuccessful(payment.requestId);
-                        }
+                        // Notificar el cambio de estado
+                        await notifyPaymentStatusChange(payment.requestId, oldStatus, newStatus);
                     }
 
                     await new Promise(resolve => setTimeout(resolve, 200));

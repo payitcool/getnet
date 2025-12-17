@@ -73,9 +73,9 @@ window.location.href = data.processUrl;
 
 ---
 
-## 3️⃣ Recibir Callback de Pago Exitoso
+## 3️⃣ Recibir Callback de Cambios de Estado
 
-Cuando el pago sea **APPROVED**, tu `externalURLCallback` recibirá un POST:
+Cuando el pago **cambie de estado** (PENDING, APPROVED, REJECTED, FAILED, EXPIRED, etc.), tu `externalURLCallback` recibirá un POST:
 
 ### Request que recibirás
 
@@ -87,7 +87,7 @@ Content-Type: application/json
     "secretHash": "a1b2c3d4e5...",
     "requestId": "161789",
     "reference": "ORDER-1733850000000",
-    "status": "APPROVED",
+    "status": "APPROVED",  // Puede ser: PENDING, APPROVED, REJECTED, FAILED, EXPIRED, etc.
     "amount": 15000,
     "currency": "CLP",
     "buyer": {
@@ -99,6 +99,13 @@ Content-Type: application/json
     "attemptNumber": 1
 }
 ```
+
+**💡 Importante:** Recibirás notificaciones para **TODOS** los cambios de estado, incluyendo:
+- `PENDING` - Pago en proceso
+- `APPROVED` - ✅ Pago exitoso
+- `REJECTED` - ❌ Pago rechazado
+- `FAILED` - ❌ Pago fallido
+- `EXPIRED` - ⏰ Sesión expirada
 
 ### Tu endpoint debe:
 
@@ -119,13 +126,32 @@ app.post('/api/webhook/pago', async (req, res) => {
         return res.status(401).json({ error: 'Unauthorized' });
     }
     
-    // 2. Procesar el pago
-    console.log(`✅ Pago ${requestId} confirmado: $${amount}`);
+    // 2. Procesar según el estado
+    console.log(`🔔 Pago ${requestId} - Estado: ${status}`);
     
-    // Tu lógica de negocio aquí:
-    // - Activar suscripción
-    // - Enviar email de confirmación
-    // - Actualizar inventario
+    switch(status) {
+        case 'PENDING':
+            // Pago en proceso - registrar inicio
+            console.log('Pago iniciado, esperando confirmación');
+            break;
+            
+        case 'APPROVED':
+            // ✅ Pago exitoso - activar servicios
+            console.log(`✅ Pago aprobado: $${amount}`);
+            // Activar suscripción, enviar email, etc.
+            break;
+            
+        case 'REJECTED':
+        case 'FAILED':
+            // ❌ Pago fallido - notificar al usuario
+            console.log(`❌ Pago rechazado/fallido`);
+            break;
+            
+        case 'EXPIRED':
+            // ⏰ Sesión expirada - limpiar recursos
+            console.log(`⏰ Sesión de pago expirada`);
+            break;
+    }
     
     // 3. Responder 200 OK (importante!)
     res.status(200).json({ received: true });
