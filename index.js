@@ -738,10 +738,38 @@ app.post('/api/create-payment', async (req, res) => {
         console.log('📥 Getnet Response:', responseData);
 
         if (!response.ok) {
-                throw new Error(responseData.status?.message || `Getnet error: ${response.status}`);
-
+            throw new Error(responseData.status?.message || `Getnet error: ${response.status}`);
         }
 
+        // Guardar en base de datos
+        await Payment.create({
+            requestId: responseData.requestId,
+            reference,
+            amount,
+            currency: paymentCurrency,
+            status: 'CREATED',
+            buyer,
+            externalURLCallback,
+            processUrl: responseData.processUrl,
+            createdAt: new Date()
+        });
+
+        await logToDB('SUCCESS', {
+            endpoint: '/api/create-payment',
+            method: 'POST',
+            requestId: responseData.requestId,
+            reference,
+            ip: req.ip
+        });
+
+        // RESPONDER AL CLIENTE
+        return res.json({
+            success: true,
+            requestId: responseData.requestId,
+            processUrl: responseData.processUrl,
+            reference,
+            expiresAt: paymentData.expiration
+        });
 
     } catch (error) {
         console.error('❌ Error connecting to Getnet:', error.response ? error.response.data : error.message);
