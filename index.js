@@ -675,12 +675,13 @@ async function queryPaymentStatus(requestId) {
 app.post('/api/create-payment', async (req, res) => {
     try {
         // Validar campos requeridos
-        const { amount, buyer, description, reference: customReference, currency, returnUrl: customReturnUrl, redirect, externalURLCallback } = req.body;
+        const { amount, buyer, description, reference: customReference, currency, returnUrl: customReturnUrl, externalURLCallback } = req.body;
         
-        // Validación mínima: solo amount y buyer.email son obligatorios
+        // Validación: amount, buyer.email y returnUrl son obligatorios
         const missingFields = [];
         if (!amount) missingFields.push('amount');
         if (!buyer || !buyer.email) missingFields.push('buyer.email');
+        if (!customReturnUrl) missingFields.push('returnUrl');
         
         if (missingFields.length > 0) {
             return res.status(400).json({
@@ -694,7 +695,6 @@ app.post('/api/create-payment', async (req, res) => {
         const paymentCurrency = currency || 'CLP';
         const paymentDescription = description || `Pago de ${paymentCurrency} $${amount}`;
         const expMinutes = 10; // Fijo en 10 minutos - no modificable por el cliente
-        const shouldRedirect = redirect !== false; // Por defecto redirige
         
         // Payment request with notificationUrl
         const paymentData = {
@@ -715,7 +715,7 @@ app.post('/api/create-payment', async (req, res) => {
                 }
             },
             expiration: moment().add(expMinutes, 'minutes').toISOString(),
-            returnUrl: returnUrl,
+            returnUrl: customReturnUrl,
             notificationUrl: `${DOMAIN}/api/notification`,
             ipAddress: req.ip || '127.0.0.1',
             userAgent: req.headers['user-agent'] || 'Unknown'
