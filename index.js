@@ -728,55 +728,10 @@ app.post('/api/create-payment', async (req, res) => {
         console.log('📥 Getnet Response:', responseData);
 
         if (!response.ok) {
-            throw new Error(responseData.message || `Getnet error: ${response.status}`);
+                throw new Error(responseData.status?.message || `Getnet error: ${response.status}`);
+
         }
 
-        if (responseData && responseData.requestId) {
-            // Save to MongoDB
-            const payment = await Payment.create({
-                requestId: responseData.requestId,
-                reference: reference,
-                amount: amount,
-                currency: paymentCurrency,
-                status: 'CREATED',
-                buyer: paymentData.buyer,
-                externalURLCallback: externalURLCallback || null,
-                callbackExecuted: false,
-                processUrl: responseData.processUrl,
-                getnetResponse: responseData,
-                lastStatusUpdate: new Date()
-            });
-
-            await logToDB('PAYMENT_CREATED', {
-                requestId: responseData.requestId,
-                endpoint: '/api/session',
-                method: 'POST',
-                statusCode: response.status,
-                request: paymentData,
-                response: responseData,
-                ip: req.ip,
-                userAgent: req.headers['user-agent']
-            });
-
-            console.log('✅ Payment saved to DB:', payment._id);
-
-            if (responseData.processUrl) {
-                // Siempre devolver JSON con la información del pago
-                return res.json({
-                    success: true,
-                    requestId: responseData.requestId,
-                    reference: reference,
-                    processUrl: responseData.processUrl,
-                    amount: amount,
-                    currency: paymentCurrency,
-                    expiresAt: paymentData.expiration
-                });
-            } else {
-                res.status(500).json({ error: 'No processUrl in response', data: response.data });
-            }
-        } else {
-            res.status(500).json({ error: 'Error creating payment session', data: response.data });
-        }
 
     } catch (error) {
         console.error('❌ Error connecting to Getnet:', error.response ? error.response.data : error.message);
